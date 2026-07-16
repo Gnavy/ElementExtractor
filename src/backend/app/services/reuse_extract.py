@@ -27,7 +27,7 @@ def extract_has_ocr_markdown(root: Path) -> bool:
 
 
 def copy_extract_skip_outputs(src: Path, dst: Path) -> None:
-    """复制解压内容，忽略 outputs/，供新任务重新跑 Claude。"""
+    """复制解压内容，忽略 outputs/，供新任务重新跑智能体。"""
     if dst.exists():
         shutil.rmtree(dst)
     dst.mkdir(parents=True)

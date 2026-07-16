@@ -525,7 +525,7 @@ curl -sS "$BASE_URL/api/v1/tasks?task_type=extraction&limit=50" \
 | `run_agent` | boolean | 是否调用智能体 |
 | `run_collection_fill` | boolean | 是否填报收集表（对外抽取/分类任务为 `false`） |
 | `result_summary` | object \| null | 完成后含 `outputs` 键，映射产物别名 → 相对路径 |
-| `claude_log_tail` | string \| null | 智能体日志尾部（排障用） |
+| `claude_log_tail` | string \| null | 智能体日志尾部（排障用；内容来自 LangGraph `outputs/agent.log`，兼容字段名未改） |
 | `created_at` / `updated_at` | string | ISO 8601 时间 |
 
 `result_summary.outputs` 示例（`due_diligence` 完成）：
@@ -538,6 +538,7 @@ curl -sS "$BASE_URL/api/v1/tasks?task_type=extraction&limit=50" \
     "validation_report": "outputs/validation_report.json",
     "classification": "outputs/classification.json",
     "extracted": "outputs/extracted.json",
+    "agent_log": "outputs/agent.log",
     "claude_log": "outputs/claude.log"
   }
 }
@@ -834,7 +835,7 @@ curl -sS "$BASE_URL/api/v1/tasks/$TASK_ID/artifacts/extracted" \
 | `template_fill` | `outputs/backfill_report.json` | 回填明细 |
 | `template_fill` | `outputs/calc_rules_report.json` | 计算规则执行报告 |
 
-辅助产物（排障）：`outputs/claude.log`、`outputs/ocr.log`（若执行 OCR）。
+辅助产物（排障）：`outputs/agent.log`（及兼容别名 `outputs/claude.log`）、`outputs/ocr.log`（若执行 OCR）。
 
 ---
 

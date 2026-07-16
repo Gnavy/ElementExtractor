@@ -69,8 +69,10 @@ _TASK_FILE_PROCESS_DIRS = frozenset(
 )
 _TASK_OUTPUT_PROCESS_NAMES = frozenset(
     {
+        "agent.log",
         "claude.log",
         "ocr.log",
+        "langgraph_checkpoints.sqlite",
         "docx_comments_index.json",
         "ppt_text_index.json",
         "tavily_policy_chengdu.json",
@@ -96,6 +98,71 @@ def _content_disposition_filename(kind: str, filename: str) -> str:
     return f'{kind}; filename="{ascii_fallback}"; filename*=UTF-8\'\'{pct}'
 
 
+def _normalize_path_key(path: str) -> str:
+    """Collapse LLM-introduced spacing noise for fuzzy path matching."""
+    s = path.replace("\\", "/").strip().lstrip("/")
+    # 项目 1 → 项目1；9 亿 → 9亿
+    s = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", s)
+    s = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", s)
+    # A 浙江 → A浙江；21 .pdf 类
+    s = re.sub(r"(?<=[A-Za-z])\s+(?=[\u4e00-\u9fff])", "", s)
+    s = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[A-Za-z0-9])", "", s)
+    # 基础资料 - 义乌 → 基础资料-义乌
+    s = re.sub(r"\s*-\s*", "-", s)
+    # 其它多余空白
+    s = re.sub(r"\s+", "", s)
+    return s.lower()
+
+
+def _resolve_extract_file(base: Path, rel: str) -> Path | None:
+    """Resolve relative path under extract root; fuzzy-match if exact miss."""
+    rel = rel.strip().lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return None
+    target = (base / rel).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return None
+    if target.is_file():
+        return target
+
+    # Exact miss: try spacing-normalized match against all files under extract
+    want = _normalize_path_key(rel)
+    if not want:
+        return None
+    best: Path | None = None
+    best_score = -1
+    # Prefer matching full relative path; also allow basename-only as last resort
+    for root_name in ("sources", "supplements", "inputs", "ocr_text", "outputs", ""):
+        root = base / root_name if root_name else base
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                cand_rel = p.relative_to(base).as_posix()
+            except ValueError:
+                continue
+            key = _normalize_path_key(cand_rel)
+            if key == want:
+                return p
+            # basename match when path prefix drifted
+            if key.endswith("/" + want) or key.rsplit("/", 1)[-1] == want.rsplit("/", 1)[-1]:
+                # score by common prefix length of normalized strings
+                score = 0
+                for a, b in zip(key, want):
+                    if a == b:
+                        score += 1
+                    else:
+                        break
+                if score > best_score and want.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1]:
+                    best_score = score
+                    best = p
+    return best
+
+
 def _safe_task_file(task_id: str, path: str, db: Session) -> Tuple[Task, Path]:
     task = db.get(Task, task_id)
     if not task:
@@ -104,10 +171,8 @@ def _safe_task_file(task_id: str, path: str, db: Session) -> Tuple[Task, Path]:
     rel = path.strip().lstrip("/")
     if ".." in rel or rel.startswith("/"):
         raise HTTPException(status_code=400, detail="非法路径")
-    target = (base / rel).resolve()
-    if not str(target).startswith(str(base)):
-        raise HTTPException(status_code=400, detail="非法路径")
-    if not target.is_file():
+    target = _resolve_extract_file(base, rel)
+    if target is None or not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
     return task, target
 

@@ -39,10 +39,14 @@ function failureStage(task: TaskDetail): string {
   if (message.includes("ocr")) return "OCR_RUNNING";
   if (
     message.includes("claude") ||
+    message.includes("langgraph") ||
+    message.includes("agent") ||
     message.includes("智能体") ||
     message.includes("schema") ||
     message.includes("回填") ||
-    message.includes("计算规则")
+    message.includes("计算规则") ||
+    message.includes("填表") ||
+    message.includes("抽取")
   ) {
     return "AGENT_RUNNING";
   }

@@ -20,39 +20,28 @@ from app.database import SessionLocal
 
 from app.models import Task, TaskStatus
 
+from app.agents.llm import should_skip_agent
+from app.agents.runner import run_agent
 from app.services.case1_validate import run_case1_validation
 from app.services.case1_xlsx_fill import try_fill_case1_collection_from_elements
 from app.services.case2_schema_pipeline import (
     apply_case2_calc_rules,
     backfill_case2_schema,
-    dump_case2_fill_schema,
     has_case2_filled_schema,
     validate_case2_backfill,
 )
-from app.services.claude_runner import run_claude
-
 from app.services.ocr_runner import run_ocr
-
 from app.services.paths import (
     copy_collection_template_into_extract,
     ensure_storage,
     task_extract_dir,
 )
-
 from app.services.reuse_extract import (
-
     copy_extract_skip_outputs,
-
     find_reusable_extract,
-
 )
-
-from app.services.skills_sync import copy_skills_to_extract
-
 from app.services.tools_sync import copy_task_tools_to_extract
-
 from app.services.task_meta import write_task_meta
-
 from app.services.unzip_service import extract_zip_archive
 
 
@@ -118,7 +107,8 @@ def _build_result_outputs(outputs_dir: Path, *, is_case1: bool, run_collection_f
     outs: dict[str, str] = {
         "classification": "outputs/classification.json",
         "extracted": "outputs/extracted.json",
-        "claude_log": "outputs/claude.log",
+        "agent_log": "outputs/agent.log",
+        "claude_log": "outputs/claude.log",  # alias for API compat
     }
     if (outputs_dir / "ocr.log").is_file():
         outs["ocr_log"] = "outputs/ocr.log"
@@ -331,20 +321,7 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
 
             write_fill_rules_files(extract_root, str(fill_logic_rules).strip())
 
-        copy_skills_to_extract(
-            settings.skills_source_dir,
-            extract_root,
-            only_skill=(
-                "business-review-case1"
-                if is_case1
-                else "business-review-case2"
-                if is_case2
-                else "business-review"
-                if is_review_case
-                else None
-            ),
-        )
-
+        # LangGraph agents load prompts from code; still sync helper scripts for debugging.
         copy_task_tools_to_extract(extract_root)
 
 
@@ -433,25 +410,25 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
 
 
         task_run_agent = getattr(task, "run_agent", True)
-
-        want_claude = task_run_agent and not settings.skip_claude
-
+        want_agent = task_run_agent and not should_skip_agent()
         skip_note_cls = (
-
-            "SKIP_CLAUDE 调试输出"
-
-            if settings.skip_claude
-
-            else "用户未勾选「分类与要素抽取」，已跳过 Claude"
-
+            "SKIP_AGENT 调试输出"
+            if should_skip_agent()
+            else "用户未勾选「分类与要素抽取」，已跳过智能体"
         )
 
-        if not want_claude:
+        def _progress_cb(msg: str) -> None:
+            try:
+                t = db.get(Task, task_id)
+                if t:
+                    t.progress_message = msg[:500]
+                    db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
 
+        if not want_agent:
             cls_json = outputs_dir / "classification.json"
-
             ext_json = outputs_dir / "extracted.json"
-
             if task_kind in ("general", "classification"):
                 cls_json.write_text(
                     json.dumps(
@@ -466,7 +443,6 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
                     ),
                     encoding="utf-8",
                 )
-
             if task_kind in ("general", "extraction"):
                 ext_json.write_text(
                     json.dumps(
@@ -476,141 +452,102 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
                     ),
                     encoding="utf-8",
                 )
-
-            (outputs_dir / "claude.log").write_text(
-
-                "skip_claude=true, Claude 未执行\n", encoding="utf-8"
-
-            )
-
-            code, log_tail, err_tail = 0, "skip_claude", ""
-
+            skip_msg = "skip_agent=true, 智能体未执行\n"
+            (outputs_dir / "agent.log").write_text(skip_msg, encoding="utf-8")
+            (outputs_dir / "claude.log").write_text(skip_msg, encoding="utf-8")
+            code, log_tail, err_tail = 0, "skip_agent", ""
             task.claude_log_tail = log_tail
-
         else:
-            skip_claude = False
+            skip_agent_run = False
             log_tail = ""
             err_tail = ""
 
             if is_template_case and _case1_outputs_ready(outputs_dir)[0]:
-                skip_claude = True
-                log_tail = "[续跑] 指标表已存在，跳过智能体。"
+                if is_case2 and not has_case2_filled_schema(extract_root):
+                    skip_agent_run = False
+                else:
+                    skip_agent_run = True
+                    log_tail = "[续跑] 指标表已存在，跳过智能体。"
             elif is_case2 and has_case2_filled_schema(extract_root):
                 calc_ok, calc_log = apply_case2_calc_rules(extract_root)
                 bf_ok, bf_log = backfill_case2_schema(extract_root)
-                if bf_ok and _case1_outputs_ready(outputs_dir)[0]:
-                    skip_claude = True
-                    log_tail = f"[续跑回填] calc={calc_log}\n{bf_log}"
+                br_ok, br_msg = (
+                    validate_case2_backfill(extract_root) if bf_ok else (False, bf_log)
+                )
+                if bf_ok and br_ok and _case1_outputs_ready(outputs_dir)[0]:
+                    skip_agent_run = True
+                    log_tail = (
+                        f"[续跑回填] calc={calc_log}\n{bf_log}\n[校验] {br_msg}"
+                    )
             elif is_case1 and (extract_root / "outputs" / "elements_extracted.json").is_file():
                 fb_ok, fb_log = try_fill_case1_collection_from_elements(extract_root)
                 if fb_ok and _case1_outputs_ready(outputs_dir)[0]:
-                    skip_claude = True
+                    skip_agent_run = True
                     log_tail = f"[续跑兜底填表] {fb_log}"
                     (outputs_dir / "collection_fill_fallback.log").write_text(
                         fb_log, encoding="utf-8"
                     )
             elif is_review_case and _review_outputs_ready_for_kind(task_kind, outputs_dir)[0]:
-                skip_claude = True
+                skip_agent_run = True
                 log_tail = "[续跑] 目标 JSON 已存在，跳过智能体。"
 
-            if skip_claude:
+            if skip_agent_run:
                 code = 0
                 task.claude_log_tail = log_tail
             else:
-                if is_case2:
-                    ds_ok, ds_log = dump_case2_fill_schema(extract_root)
-                    if not ds_ok:
-                        task.status = TaskStatus.FAILED.value
-                        task.error_message = f"Case2 schema 导出失败:\n{ds_log}"
-                        task.progress_message = None
-                        db.commit()
-                        return {"ok": False, "error": task.error_message}
-                    log_tail = f"[case2 schema] {ds_log}"
-                code, log_tail, err_tail = run_claude(
+                code, log_tail, err_tail = run_agent(
                     extract_root,
                     outputs_dir,
                     task_id=str(task.id),
                     task_kind=getattr(task, "task_kind", None),
+                    on_progress=_progress_cb,
                 )
-                if is_case2:
-                    if not has_case2_filled_schema(extract_root):
-                        task.status = TaskStatus.FAILED.value
-                        task.error_message = (
-                            "Case2 缺少 outputs/case2_filled_schema.json，"
-                            "请按 schema 输出 JSON 后重试。"
-                        )
-                        task.progress_message = None
-                        db.commit()
-                        return {"ok": False, "error": task.error_message}
-                    calc_ok, calc_log = apply_case2_calc_rules(extract_root)
-                    if not calc_ok:
-                        task.status = TaskStatus.FAILED.value
-                        task.error_message = f"Case2 计算规则失败:\n{calc_log}"
-                        task.progress_message = None
-                        db.commit()
-                        return {"ok": False, "error": task.error_message}
-                    bf_ok, bf_log = backfill_case2_schema(extract_root)
-                    if not bf_ok:
-                        task.status = TaskStatus.FAILED.value
-                        task.error_message = f"Case2 回填失败:\n{bf_log}"
-                        task.progress_message = None
-                        db.commit()
-                        return {"ok": False, "error": task.error_message}
-                    br_ok, br_msg = validate_case2_backfill(extract_root)
-                    if not br_ok:
-                        task.status = TaskStatus.FAILED.value
-                        task.error_message = f"Case2 回填校验失败: {br_msg}"
-                        task.progress_message = None
-                        db.commit()
-                        return {"ok": False, "error": task.error_message}
-                    log_tail = (
-                        (log_tail or "")
-                        + f"\n---\n[case2 calc] {calc_log}\n[case2 backfill] {bf_log}\n[校验] {br_msg}\n"
+                if is_case2 and not has_case2_filled_schema(extract_root):
+                    task.claude_log_tail = log_tail
+                    task.status = TaskStatus.FAILED.value
+                    task.error_message = (
+                        "Case2 缺少 outputs/case2_filled_schema.json，"
+                        "请检查智能体日志后重试。"
                     )
+                    task.progress_message = None
+                    db.commit()
+                    return {"ok": False, "error": task.error_message}
 
             if is_template_case:
-                if not _case1_outputs_ready(outputs_dir)[0]:
-                    if is_case1:
-                        fb_ok, fb_log = try_fill_case1_collection_from_elements(
-                            extract_root
+                if not _case1_outputs_ready(outputs_dir)[0] and is_case1:
+                    fb_ok, fb_log = try_fill_case1_collection_from_elements(
+                        extract_root
+                    )
+                    if fb_ok:
+                        log_tail = (log_tail or "") + f"\n---\n[兜底填表] {fb_log}\n"
+                        (outputs_dir / "collection_fill_fallback.log").write_text(
+                            fb_log, encoding="utf-8"
                         )
-                        if fb_ok:
-                            log_tail = (log_tail or "") + f"\n---\n[兜底填表] {fb_log}\n"
-                            (outputs_dir / "collection_fill_fallback.log").write_text(
-                                fb_log, encoding="utf-8"
-                            )
                 outputs_ok, outputs_err = _case1_outputs_ready(outputs_dir)
             else:
-                outputs_ok, outputs_err = _review_outputs_ready_for_kind(task_kind, outputs_dir)
-
-            if not outputs_ok:
-
-                task.claude_log_tail = log_tail
-
-                task.status = TaskStatus.FAILED.value
-
-                api_hint = ""
-                if "529" in (log_tail or "") or "overloaded" in (log_tail or "").lower():
-                    api_hint = (
-                        "\n提示：智能体 API 过载(529)。要素 JSON 若已生成，"
-                        "系统将尝试兜底填表；请稍后重试或检查 outputs/elements_extracted.json。"
-                    )
-                task.error_message = (
-                    f"Claude 退出码 {code}；{outputs_err}{api_hint}\n{err_tail}"
+                outputs_ok, outputs_err = _review_outputs_ready_for_kind(
+                    task_kind, outputs_dir
                 )
 
+            if not outputs_ok:
+                task.claude_log_tail = log_tail
+                task.status = TaskStatus.FAILED.value
+                api_hint = ""
+                low = (log_tail or "").lower()
+                if "529" in (log_tail or "") or "overloaded" in low or "rate" in low:
+                    api_hint = (
+                        "\n提示：LLM API 瞬时错误。若中间产物已生成，"
+                        "可续跑任务或检查 outputs/。"
+                    )
+                task.error_message = (
+                    f"智能体退出码 {code}；{outputs_err}{api_hint}\n{err_tail}"
+                )
                 task.progress_message = None
-
                 db.commit()
-
                 return {"ok": False, "error": task.error_message}
 
-            # Claude Code CLI 在 --print 模式下有时即使用户任务已完成仍返回非零退出码；
-
-            # 以磁盘上的合法 outputs 为准判定成功。
-
+            # 以磁盘合法 outputs 为准；非零退出码但产物齐全仍判成功
             if code != 0:
-
                 success_desc = (
                     "outputs/collection_filled.xlsx 已生成"
                     if is_template_case
@@ -620,33 +557,25 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
                     if task_kind == "extraction"
                     else "outputs/classification.json 与 extracted.json 已存在且可解析"
                 )
-
                 warn = (
-
-                    f"\n---\n注意：Claude CLI 退出码为 {code}，"
-
+                    f"\n---\n注意：智能体退出码为 {code}，"
                     f"但 {success_desc}，已判定任务成功。"
-
                     f"\nstderr 节选:\n{err_tail}"
-
                 )
-
                 task.claude_log_tail = log_tail + warn
-
             else:
-
                 task.claude_log_tail = log_tail
 
         fill_coll = getattr(task, "run_collection_fill", True)
 
-        if is_template_case and not want_claude:
+        if is_template_case and not want_agent:
             task.status = TaskStatus.FAILED.value
-            task.error_message = "模板填报任务需要智能体执行，无法跳过 Claude"
+            task.error_message = "模板填报任务需要智能体执行，无法跳过"
             task.progress_message = None
             db.commit()
             return {"ok": False, "error": task.error_message}
 
-        if is_template_case and want_claude:
+        if is_template_case and want_agent:
             ok, err = _case1_outputs_ready(outputs_dir)
             if not ok:
                 task.status = TaskStatus.FAILED.value
@@ -668,8 +597,9 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
                     return {"ok": False, "error": task.error_message}
 
         task.status = TaskStatus.COMPLETED.value
-
-        task.progress_message = "完成" if not is_template_case else "指标表已生成，可下载"
+        task.progress_message = (
+            "完成" if not is_template_case else "指标表已生成，可下载"
+        )
 
         outs = _build_result_outputs(
             outputs_dir,

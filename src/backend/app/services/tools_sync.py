@@ -21,7 +21,7 @@ TOOL_SCRIPTS = (
 
 def copy_task_tools_to_extract(extract_root: Path) -> None:
     """
-    Copy helper scripts into extract_root/tools/ for Claude Code (cwd = extract_root).
+    Copy helper scripts into extract_root/tools/ for local debugging / deterministic tools.
     """
     backend_dir = Path(__file__).resolve().parent.parent.parent
     dest_dir = extract_root / "tools"

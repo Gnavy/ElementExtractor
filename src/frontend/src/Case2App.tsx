@@ -176,7 +176,9 @@ export function Case2App() {
 
   const outputs = detail?.result_summary?.outputs ?? {};
   const selectedId = hashTaskId;
-  const outputEntries = Object.entries(outputs).filter(([key]) => key !== "claude_log");
+  const outputEntries = Object.entries(outputs).filter(
+    ([key]) => key !== "claude_log" && key !== "agent_log"
+  );
 
   return (
     <div className="app-shell case1-shell">

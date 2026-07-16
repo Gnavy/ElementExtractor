@@ -33,6 +33,14 @@ DEFAULT_KEYWORDS = (
 )
 
 
+def _is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="列出 ocr_text 中与司法相关的 .md 路径")
     p.add_argument(
@@ -59,10 +67,18 @@ def main() -> None:
 
     cwd = Path.cwd().resolve()
     root = (cwd / args.root).resolve()
-    if not str(root).startswith(str(cwd)):
+    if not _is_under(root, cwd) and root != cwd:
         raise SystemExit("路径必须位于当前工作目录之下")
     if not root.is_dir():
-        raise SystemExit(f"目录不存在：{root}")
+        # OCR 未执行或目录缺失时不作为硬错误，写空索引即可
+        if args.out:
+            out_path = (cwd / args.out).resolve()
+            if not _is_under(out_path, cwd):
+                raise SystemExit("输出路径必须位于当前工作目录之下")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text("", encoding="utf-8")
+            print(str(Path(args.out).as_posix()))
+        return
 
     paths: list[str] = []
     for md in sorted(root.rglob("*.md")):
@@ -76,9 +92,9 @@ def main() -> None:
     text = "\n".join(paths)
     if args.out:
         out_path = (cwd / args.out).resolve()
-        if not str(out_path).startswith(str(cwd)):
+        if not _is_under(out_path, cwd):
             raise SystemExit("输出路径必须位于当前工作目录之下")
-        out_path.parent.mkdir(parents=True, exist=True)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text + ("\n" if text else ""), encoding="utf-8")
         print(str(Path(args.out).as_posix()))
     else:

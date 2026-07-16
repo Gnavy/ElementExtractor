@@ -40,15 +40,65 @@ class Settings(BaseSettings):
         description="单个 PPTX 经 LibreOffice 转 PDF 的超时秒数（PPTX_CONVERT_TIMEOUT_SEC）",
     )
 
-    claude_bin: str = "claude"
-    claude_timeout_sec: int = 3600
-    claude_stream_to_console: bool = Field(
-        default=True,
-        description="Celery worker 执行时将 Claude CLI 输出实时打印到控制台（CLAUDE_STREAM_TO_CONSOLE）",
+    llm_provider: str = Field(
+        default="anthropic",
+        description="LLM 提供商：anthropic | openai | zhipu | bailian（LLM_PROVIDER）",
     )
-    claude_verbose: bool = Field(
-        default=False,
-        description="为 Claude CLI 追加 --verbose，输出更多调试信息（CLAUDE_VERBOSE）",
+    llm_model: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="LLM 模型名（LLM_MODEL）",
+    )
+    llm_timeout_sec: int = Field(
+        default=3600,
+        description="LangGraph 智能体超时秒数（LLM_TIMEOUT_SEC）",
+    )
+    llm_max_retries: int = Field(
+        default=3,
+        description="LLM 调用瞬时错误重试次数（LLM_MAX_RETRIES）",
+    )
+    llm_temperature: float = Field(
+        default=0.0,
+        description="LLM 温度（LLM_TEMPERATURE）",
+    )
+    anthropic_api_key: Optional[str] = Field(
+        default=None,
+        description="Anthropic API Key（ANTHROPIC_API_KEY）",
+    )
+    openai_api_key: Optional[str] = Field(
+        default=None,
+        description="OpenAI API Key（OPENAI_API_KEY）",
+    )
+    openai_base_url: Optional[str] = Field(
+        default=None,
+        description="OpenAI 兼容 API Base URL（OPENAI_BASE_URL）",
+    )
+    zhipu_api_key: Optional[str] = Field(
+        default=None,
+        description="智谱 API Key（ZHIPU_API_KEY）",
+    )
+    zhipu_base_url: str = Field(
+        default="https://open.bigmodel.cn/api/paas/v4/",
+        description="智谱 OpenAI 兼容 Base URL（ZHIPU_BASE_URL）",
+    )
+    bailian_api_key: Optional[str] = Field(
+        default=None,
+        description="阿里云百炼 API Key（BAILIAN_API_KEY）",
+    )
+    dashscope_api_key: Optional[str] = Field(
+        default=None,
+        description="DashScope API Key 别名（DASHSCOPE_API_KEY）",
+    )
+    bailian_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        description="百炼 OpenAI 兼容 Base URL（BAILIAN_BASE_URL）",
+    )
+    agent_stream_to_console: bool = Field(
+        default=True,
+        description="Celery worker 将智能体进度打印到控制台（AGENT_STREAM_TO_CONSOLE）",
+    )
+    agent_parallel_workers: int = Field(
+        default=4,
+        description="LangGraph 并行节点并发上限（AGENT_PARALLEL_WORKERS）",
     )
 
     tavily_api_key: Optional[str] = Field(
@@ -61,7 +111,15 @@ class Settings(BaseSettings):
     )
 
     skip_ocr: bool = Field(False, description="Skip Docling OCR step")
-    skip_claude: bool = Field(False, description="Skip Claude CLI; write stub JSON for pipeline smoke tests")
+    skip_agent: bool = Field(
+        False,
+        description="Skip LangGraph agent; write stub JSON for pipeline smoke tests（SKIP_AGENT）",
+    )
+    # 兼容旧环境变量 SKIP_CLAUDE
+    skip_claude: bool = Field(
+        False,
+        description="Deprecated alias of SKIP_AGENT（SKIP_CLAUDE）",
+    )
     ocr_confidence_threshold: float = Field(
         default=0.7,
         description="OCR 置信度低于该阈值（0-1）时在 Case2 回填 xlsx 中标黄（OCR_CONFIDENCE_THRESHOLD）",
