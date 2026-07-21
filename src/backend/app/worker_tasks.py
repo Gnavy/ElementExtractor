@@ -145,10 +145,20 @@ def _extract_has_material(extract_root: Path) -> bool:
 
 
 def _ocr_already_done(extract_root: Path, outputs_dir: Path) -> bool:
-    if (outputs_dir / "ocr.log").is_file():
-        return True
+    """仅当已有 OCR/正文 markdown 时视为完成；「用户未勾选已跳过」的 ocr.log 不算。"""
+    del outputs_dir  # 保留参数兼容调用方
     ocr_text = extract_root / "ocr_text"
     return ocr_text.is_dir() and any(ocr_text.rglob("*.md"))
+
+
+def _extract_has_pdf_or_pptx(extract_root: Path) -> bool:
+    skip = {"ocr_text", "outputs", "inputs", "tools", "__MACOSX", ".claude"}
+    for pattern in ("*.pdf", "*.pptx", "*.ppt"):
+        for p in extract_root.rglob(pattern):
+            if any(part in skip for part in p.parts):
+                continue
+            return True
+    return False
 
 
 def _db() -> Session:
@@ -333,6 +343,16 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
 
 
         task_run_ocr = getattr(task, "run_ocr", True)
+        # Case1：补充材料含 PDF/PPT 且尚未产出 ocr_text 时自动开启 Docling
+        if (
+            is_case1
+            and not settings.skip_ocr
+            and not _ocr_already_done(extract_root, outputs_dir)
+            and _extract_has_pdf_or_pptx(extract_root)
+        ):
+            task_run_ocr = True
+            task.run_ocr = True
+            db.commit()
 
         want_ocr = task_run_ocr and not settings.skip_ocr
 
@@ -465,6 +485,17 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
             if is_template_case and _case1_outputs_ready(outputs_dir)[0]:
                 if is_case2 and not has_case2_filled_schema(extract_root):
                     skip_agent_run = False
+                elif is_case1:
+                    # 仅当指标表校验已通过才跳过；校验失败或缺少正文索引则重跑智能体
+                    has_docx_body = (
+                        extract_root / "outputs" / "docx_text_index.json"
+                    ).is_file()
+                    val_ok, _ = run_case1_validation(extract_root)
+                    if val_ok and has_docx_body:
+                        skip_agent_run = True
+                        log_tail = "[续跑] 指标表已存在且校验通过，跳过智能体。"
+                    else:
+                        skip_agent_run = False
                 else:
                     skip_agent_run = True
                     log_tail = "[续跑] 指标表已存在，跳过智能体。"

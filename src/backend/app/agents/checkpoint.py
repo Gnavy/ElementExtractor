@@ -28,12 +28,17 @@ def open_checkpointer(extract_root: Path) -> Iterator[Any]:
         return
 
     db = checkpoint_db_path(extract_root)
+    entered = False
     try:
         with SqliteSaver.from_conn_string(str(db)) as saver:
+            entered = True
             yield saver
     except Exception:
-        # 断点库损坏或不兼容时降级为无 checkpointer
-        yield None
+        # 仅在尚未 yield 时降级；若已在图执行中抛错，原样向上抛，避免二次 yield
+        if not entered:
+            yield None
+        else:
+            raise
 
 
 def thread_config(task_id: str) -> dict:

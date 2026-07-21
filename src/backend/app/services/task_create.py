@@ -316,7 +316,7 @@ def create_case1_task(
     docx_name: str,
     docx_bytes: bytes,
     supplements: list[tuple[str, bytes]],
-    run_ocr: bool = False,
+    run_ocr: bool = True,
     indicator_judgment_rules: str = "",
     enqueue: bool = True,
 ) -> Task:
@@ -445,8 +445,9 @@ def create_case2_task(
 
 
 def validate_case1_supplements(supplements: list[tuple[str, bytes]]) -> tuple[list[tuple[str, bytes]], bool]:
+    """返回 (校验后的补充文件, 是否建议/需要 OCR：含 PDF 或 PPTX)。"""
     max_bytes = settings.max_zip_mb * 1024 * 1024
-    has_pdf = False
+    needs_ocr = False
     validated: list[tuple[str, bytes]] = []
     for name, data in supplements:
         suf = Path(name).suffix.lower()
@@ -458,9 +459,9 @@ def validate_case1_supplements(supplements: list[tuple[str, bytes]]) -> tuple[li
         if len(data) > max_bytes:
             raise HTTPException(status_code=400, detail=f"补充文件 {name} 过大")
         validated.append((name, data))
-        if suf == ".pdf":
-            has_pdf = True
-    return validated, has_pdf
+        if suf in {".pdf", ".pptx", ".ppt"}:
+            needs_ocr = True
+    return validated, needs_ocr
 
 
 def validate_case2_sources(src_pairs: list[tuple[str, bytes]]) -> tuple[list[tuple[str, bytes]], bool]:

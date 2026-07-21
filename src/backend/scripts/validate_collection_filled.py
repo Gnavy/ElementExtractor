@@ -21,6 +21,25 @@ def _norm(v) -> str:
     return str(v).strip()
 
 
+def _remark_has_citation(remark: str) -> bool:
+    """备注须含源文件引用与原文摘录。"""
+    e = remark or ""
+    if "<引用>" in e and "</引用>" in e and "原文" in e:
+        return True
+    # 兼容宽松写法：来源/文件名 + 原文「」
+    if ("原文" in e or "「" in e) and (
+        ".docx" in e.lower()
+        or ".pptx" in e.lower()
+        or ".pdf" in e.lower()
+        or "尽调" in e
+        or "可研" in e
+        or "http://" in e
+        or "https://" in e
+    ):
+        return True
+    return False
+
+
 def validate(catalog_path: Path, filled_path: Path) -> dict:
     from openpyxl import load_workbook
 
@@ -55,6 +74,11 @@ def validate(catalog_path: Path, filled_path: Path) -> dict:
                                 )
                             if d and not e:
                                 warnings.append(f"行{row_n} 已填指标选择但备注为空")
+                            elif d and e and not _remark_has_citation(e):
+                                warnings.append(
+                                    f"行{row_n}「{ind}」备注缺少源文件名与原文引用"
+                                    f"（建议：判断要点。<引用>文件名：原文「…」</引用>）"
+                                )
                             if d and e:
                                 stats["remarks_filled"] += 1
 
@@ -83,7 +107,12 @@ def validate(catalog_path: Path, filled_path: Path) -> dict:
                                 )
                             if not e:
                                 warnings.append(f"行{row_n} 已选选项但备注为空")
-                            else:
+                            elif not _remark_has_citation(e):
+                                warnings.append(
+                                    f"行{row_n}「{ind}」备注缺少源文件名与原文引用"
+                                    f"（建议：判断要点。<引用>文件名：原文「…」</引用>）"
+                                )
+                            if e:
                                 stats["remarks_filled"] += 1
     finally:
         wb.close()

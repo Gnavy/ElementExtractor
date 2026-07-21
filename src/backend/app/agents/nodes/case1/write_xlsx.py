@@ -8,8 +8,20 @@ from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 
 
-def _set_cell(ws, row: int, col: int, value) -> bool:
+def _merge_anchor(ws, row: int, col: int) -> tuple[int, int]:
+    """互斥组 D/E 常为纵向合并；非首行是 MergedCell，须写到合并区左上角。"""
     cell = ws.cell(row, col)
+    if not isinstance(cell, MergedCell):
+        return row, col
+    for mr in ws.merged_cells.ranges:
+        if mr.min_row <= row <= mr.max_row and mr.min_col <= col <= mr.max_col:
+            return mr.min_row, mr.min_col
+    return row, col
+
+
+def _set_cell(ws, row: int, col: int, value) -> bool:
+    anchor_row, anchor_col = _merge_anchor(ws, row, col)
+    cell = ws.cell(anchor_row, anchor_col)
     if isinstance(cell, MergedCell):
         return False
     if cell.data_type == "f":
@@ -42,13 +54,18 @@ def write_xlsx_node(state: dict[str, Any]) -> dict[str, Any]:
     default_sheet = wb.sheetnames[0]
     written_choice = 0
     written_remark = 0
-    for (sheet, row), f in by_key.items():
+    # 无 choice 的行先写备注；有 choice 的后写，避免互斥合并格被空选项备注覆盖
+    ordered = sorted(
+        by_key.items(),
+        key=lambda kv: 0 if (kv[1].get("choice") in (None, "")) else 1,
+    )
+    for (sheet, row), f in ordered:
         ws_name = sheet if sheet in wb.sheetnames else default_sheet
         ws = wb[ws_name]
         choice = f.get("choice")
         remark = f.get("remark") or ""
         if choice not in (None, ""):
-            if _set_cell(ws, row, 4, choice):  # D
+            if _set_cell(ws, row, 4, choice):  # D（合并则写到锚点）
                 written_choice += 1
         if remark:
             if _set_cell(ws, row, 5, remark):  # E

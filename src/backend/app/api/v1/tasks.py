@@ -203,14 +203,14 @@ async def v1_create_task(
             if not uf.filename:
                 continue
             raw_supplements.append((Path(uf.filename).name, await uf.read()))
-        supplements, has_pdf = validate_case1_supplements(raw_supplements)
+        supplements, needs_ocr = validate_case1_supplements(raw_supplements)
 
         task = create_case1_task(
             db,
             docx_name=docx_name,
             docx_bytes=docx_bytes,
             supplements=supplements,
-            run_ocr=form_bool(run_ocr) or has_pdf,
+            run_ocr=form_bool(run_ocr) or needs_ocr,
             indicator_judgment_rules=indicator_judgment_rules,
         )
         return _create_response(task.id, task.status, task.task_kind)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.agents.schemas.coerce import coerce_json_list
 
 
 class Case1RowFill(BaseModel):
@@ -13,15 +15,34 @@ class Case1RowFill(BaseModel):
     )
     remark: str = Field(
         default="",
-        description="E列一句话备注（含关键事实与数据源文件）",
+        description=(
+            "E列备注：判断要点 + <引用>源文件名：原文「……」</引用>；"
+            "必须含源文件名与原文摘录，禁止只写见报告"
+        ),
     )
-    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(
+        default_factory=list,
+        description="证据路径列表（JSON 数组，不要序列化成字符串）",
+    )
+
+    @field_validator("evidence_refs", mode="before")
+    @classmethod
+    def _coerce_evidence_refs(cls, v):
+        return coerce_json_list(v)
 
 
 class Case1GroupFill(BaseModel):
     indicator_name: str = ""
-    rows: list[Case1RowFill] = Field(default_factory=list)
+    rows: list[Case1RowFill] = Field(
+        default_factory=list,
+        description="本组各行填报结果，必须是对象数组，禁止把数组再 JSON 字符串化",
+    )
     notes: Optional[str] = None
+
+    @field_validator("rows", mode="before")
+    @classmethod
+    def _coerce_rows(cls, v):
+        return coerce_json_list(v)
 
 
 class RegionResolve(BaseModel):

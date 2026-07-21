@@ -7,8 +7,8 @@ export type Case1RulePreset = {
 /** 页面加载时默认填入 */
 export const DEFAULT_INDICATOR_JUDGMENT_RULES = `【通用总则】
 1. 按 template_row_catalog 每行的 data_source_priority 取证；尽调 docx 优先，模板要求时必须使用补充材料（可研/PPT 等）。
-2. 禁止照抄模板 D/E 列旧值；无材料依据时填「否」或互斥组留空，备注写「文件中未发现相关信息」。
-3. E 列备注一句话：关键事实 + 来源文件。
+2. 禁止照抄模板 D/E 列旧值；无材料依据时填「否」或互斥组选兜底项，备注须说明未检索到的内容。
+3. E 列备注格式：判断要点。<引用>源文件名：原文「……」</引用>。源文件名与原文摘录均须写清，禁止只写「见报告」。
 4. yes_no 每行独立判断；exclusive 组内仅一行 D 有值且与 C 列选项全文一致。`;
 
 export const CASE1_RULE_PRESETS: Case1RulePreset[] = [

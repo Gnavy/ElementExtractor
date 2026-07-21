@@ -12,6 +12,7 @@ TOOL_SCRIPTS = (
     "apply_case2_calc_rules.py",
     "ocr_inventory.py",
     "extract_docx_comments.py",
+    "extract_docx_text.py",
     "extract_pptx_text.py",
     "fill_case1_collection.py",
     "validate_collection_filled.py",

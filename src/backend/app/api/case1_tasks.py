@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/case1", tags=["case1"])
 async def create_case1_task_endpoint(
     due_diligence_docx: UploadFile = File(...),
     supplementary_files: Optional[List[UploadFile]] = File(None),
-    run_ocr: str = Form("false"),
+    run_ocr: str = Form("true"),
     indicator_judgment_rules: str = Form(""),
     db: Session = Depends(get_db),
 ):
@@ -31,8 +31,8 @@ async def create_case1_task_endpoint(
         name = Path(uf.filename).name
         raw_supplements.append((name, await uf.read()))
 
-    supplements, has_pdf = validate_case1_supplements(raw_supplements)
-    run_ocr_flag = form_bool(run_ocr) or has_pdf
+    supplements, needs_ocr = validate_case1_supplements(raw_supplements)
+    run_ocr_flag = form_bool(run_ocr) or needs_ocr
 
     task = create_case1_task(
         db,

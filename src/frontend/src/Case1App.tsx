@@ -57,7 +57,7 @@ export function Case1App() {
 
   const [docxFile, setDocxFile] = useState<File | null>(null);
   const [supplements, setSupplements] = useState<FileList | null>(null);
-  const [runOcr, setRunOcr] = useState(false);
+  const [runOcr, setRunOcr] = useState(true);
   const [indicatorRules, setIndicatorRules] = useState(
     DEFAULT_INDICATOR_JUDGMENT_RULES
   );
@@ -155,9 +155,12 @@ export function Case1App() {
     setBusy(true);
     try {
       const supp = supplements ? Array.from(supplements) : [];
-      const hasPdf = supp.some((f) => f.name.toLowerCase().endsWith(".pdf"));
+      const needsOcr = supp.some((f) => {
+        const n = f.name.toLowerCase();
+        return n.endsWith(".pdf") || n.endsWith(".pptx") || n.endsWith(".ppt");
+      });
       const res = await createCase1Task(docxFile, supp, {
-        runOcr: runOcr || hasPdf,
+        runOcr: runOcr || needsOcr,
         indicatorJudgmentRules: indicatorRules.trim(),
       });
       setCase1TaskHash(res.id);
@@ -324,7 +327,7 @@ export function Case1App() {
                 disabled={busy}
               />
               <span className="muted small">
-                含扫描件时将自动启用文字识别；PPT/可研仅作背景补充。
+                含 PDF/PPT 时将自动启用 Docling 文字识别；尽调 Word 正文会单独抽取供指标取证。
               </span>
             </label>
             <label className="checkbox-row">
@@ -334,7 +337,7 @@ export function Case1App() {
                 onChange={(e) => setRunOcr(e.target.checked)}
                 disabled={busy}
               />
-              执行扫描件文字识别（补充扫描件时建议开启）
+              执行扫描件/PPT 文字识别（Docling；含 PDF/PPT 时建议保持开启）
             </label>
             <label className="field">
               <span>指标判断规则（选填，系统将优先遵循）</span>

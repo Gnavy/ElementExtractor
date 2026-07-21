@@ -46,6 +46,68 @@ def _read_text_cap(path: Path, max_chars: int) -> str:
     return text[:max_chars] + "\n…(truncated)"
 
 
+def _extract_keyword_windows(
+    text: str,
+    kws: list[str],
+    *,
+    max_chars: int,
+    window_before: int = 450,
+    window_after: int = 900,
+) -> str:
+    """
+    从长文档中按关键词截取上下文窗口并合并，避免只读文件头部导致漏证。
+    无命中时退回文首。
+    """
+    if not text:
+        return ""
+    if not kws or len(text) <= max_chars:
+        return text if len(text) <= max_chars else text[:max_chars] + "\n…(truncated)"
+
+    lower = text.lower()
+    spans: list[tuple[int, int]] = []
+    for k in kws:
+        if not k:
+            continue
+        start = 0
+        hits = 0
+        while hits < 8:
+            idx = lower.find(k, start)
+            if idx < 0:
+                break
+            a = max(0, idx - window_before)
+            b = min(len(text), idx + len(k) + window_after)
+            spans.append((a, b))
+            start = idx + max(len(k), 1)
+            hits += 1
+
+    if not spans:
+        return text[:max_chars] + ("\n…(truncated)" if len(text) > max_chars else "")
+
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1] + 80:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+
+    parts: list[str] = []
+    total = 0
+    for a, b in merged:
+        piece = text[a:b].strip()
+        if not piece:
+            continue
+        chunk = f"…\n{piece}\n…" if a > 0 or b < len(text) else piece
+        if total + len(chunk) > max_chars:
+            remain = max_chars - total
+            if remain > 200:
+                parts.append(chunk[:remain] + "\n…(truncated)")
+            break
+        parts.append(chunk)
+        total += len(chunk)
+    return "\n".join(parts) if parts else text[:max_chars]
+
+
 def expand_keywords(keywords: list[str] | None) -> list[str]:
     """
     Expand field names like「营业执照-文书名称」「注册资本_万元」into searchable tokens.
@@ -99,6 +161,7 @@ def collect_ocr_snippets(
         candidates.extend(sorted(ocr_dir.rglob("*.md")))
 
     for name in (
+        "docx_text_index.json",
         "docx_comments_index.json",
         "ppt_text_index.json",
         "ocr_litigation_index.txt",
@@ -113,17 +176,30 @@ def collect_ocr_snippets(
     for path in candidates:
         score = 1  # base score so every OCR file remains eligible
         low_name = path.as_posix().lower()
+        # Prefer primary diligence body / ppt indexes
+        if "docx_text" in low_name or low_name.endswith(".docx.md"):
+            score += 6
+        if ".chunks/" in low_name or low_name.endswith(".chunks"):
+            score += 3
+        if "ppt_text" in low_name or ".pptx" in low_name:
+            score += 4
         head = ""
+        full_for_score = ""
         if kws:
             try:
-                head = path.read_text(encoding="utf-8", errors="replace")[:12000].lower()
+                # 长文按关键词评分时多读一些，避免只看文首
+                full_for_score = path.read_text(encoding="utf-8", errors="replace")
+                head = full_for_score[:20000].lower()
             except OSError:
                 head = ""
+                full_for_score = ""
             for k in kws:
                 if k in low_name:
                     score += 5
                 if k and k in head:
                     score += 2
+                elif k and full_for_score and k in full_for_score.lower():
+                    score += 3
             # Prefer license / title-deed-ish paths for related field names
             boost_tokens = ("营业执照", "不动产权", "土地使用权", "规划许可", "施工许可", "预售")
             if any(t in "".join(kws) for t in boost_tokens):
@@ -140,7 +216,11 @@ def collect_ocr_snippets(
             rel = path.relative_to(extract_root).as_posix()
         except ValueError:
             rel = path.name
-        body = _read_text_cap(path, max_chars_per_file)
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = _extract_keyword_windows(raw, kws, max_chars=max_chars_per_file)
         if not body.strip():
             continue
         chunk = f"### {rel}\n{body}\n"
