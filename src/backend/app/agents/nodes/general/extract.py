@@ -301,6 +301,10 @@ def extract_one_field_node(state: dict[str, Any]) -> dict[str, Any]:
                     "source": result2.crop_source,
                 }
 
+    if ftype == "image":
+        # 图片路径必须由裁剪节点在文件实际生成后写入，避免模型返回尚不存在的预期路径
+        entry["value"] = None
+
     return {
         "extracted_fields": {field_name: entry},
         "log_lines": [

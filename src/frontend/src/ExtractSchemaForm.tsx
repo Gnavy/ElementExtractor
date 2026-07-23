@@ -31,7 +31,11 @@ const TYPE_OPTIONS: { value: ExtractFieldType; label: string }[] = [
 ];
 
 function newId(): string {
-  return crypto.randomUUID();
+  // randomUUID 仅在 HTTPS 或 localhost 等安全上下文可用，HTTP IP 访问时需回退生成表单行 ID
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `field-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
 }
 
 export function defaultExtractFieldRows(): ExtractFieldRow[] {
