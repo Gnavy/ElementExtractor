@@ -18,10 +18,17 @@ app = FastAPI()
 _reader = PaddleOCR(
     lang=os.environ.get("PADDLEOCR_LANG", "ch"),
     ocr_version=os.environ.get("PADDLEOCR_VERSION", "PP-OCRv5"),
+    # server 检测模型在关闭 oneDNN 后曾申请约 7.5GB 内存导致 OOM（该 VM 仅约 8GB 内存）；
+    # 改用 mobile 检测/识别模型降低内存占用，代价是精度略低于 server 版本
+    text_detection_model_name=os.environ.get("PADDLEOCR_DET_MODEL", "PP-OCRv5_mobile_det"),
+    text_recognition_model_name=os.environ.get("PADDLEOCR_REC_MODEL", "PP-OCRv5_mobile_rec"),
     use_doc_orientation_classify=False,
     use_doc_unwarping=False,
     use_textline_orientation=False,
     text_rec_score_thresh=float(os.environ.get("PADDLEOCR_SCORE_THRESH", "0.0")),
+    # Paddle 新 PIR 执行器 + oneDNN 对检测模型某些算子（双精度数组属性）尚未实现转换，
+    # 关闭 oneDNN 加速、退回普通 CPU 执行以规避 NotImplementedError
+    enable_mkldnn=False,
 )
 
 

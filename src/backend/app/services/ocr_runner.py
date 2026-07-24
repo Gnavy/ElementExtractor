@@ -38,6 +38,9 @@ def run_ocr(extract_root: Path, log_path: Optional[Path] = None) -> Tuple[int, s
     env["OCR_CONFIDENCE_THRESHOLD"] = str(settings.ocr_confidence_threshold)
     env["PADDLE_PDX_CACHE_HOME"] = str(settings.paddle_pdx_cache_home)
     env["DOCLING_CACHE_DIR"] = str(settings.docling_cache_dir)
+    # 模型已在本地缓存目录，跳过 huggingface_hub 的联网校验，
+    # 避免部分网络环境下连接挂起（VM 实测曾导致单页处理从约 16s 变为约 4.5 分钟）
+    env["HF_HUB_OFFLINE"] = "1"
     if settings.paddleocr_service_url:
         env["PADDLEOCR_SERVICE_URL"] = settings.paddleocr_service_url
 

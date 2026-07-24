@@ -13,6 +13,8 @@ services:
       - "8900:8900"
     volumes:
       - paddleocr-models:/models
+    environment:
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
     restart: unless-stopped
 
 volumes:
