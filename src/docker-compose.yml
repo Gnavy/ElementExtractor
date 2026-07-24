@@ -7,5 +7,14 @@ services:
     volumes:
       - redis-data:/data
 
+  paddleocr-service:
+    build: ./backend/paddleocr_service
+    ports:
+      - "8900:8900"
+    volumes:
+      - paddleocr-models:/models
+    restart: unless-stopped
+
 volumes:
   redis-data: {}
+  paddleocr-models: {}

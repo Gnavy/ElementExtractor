@@ -8,7 +8,7 @@ from app.config import settings
 
 def run_ocr(extract_root: Path, log_path: Optional[Path] = None) -> Tuple[int, str]:
     """
-    Run docling conversion: PDF OCR; PPTX via LibreOffice -> PDF -> RapidOCR.
+    Run docling conversion: PDF OCR; PPTX via LibreOffice -> PDF -> PaddleOCR.
     Prefer OCR_PYTHON if set, else ``conda run -n <conda_env>``.
     """
     script = settings.ocr_script.resolve()
@@ -36,6 +36,10 @@ def run_ocr(extract_root: Path, log_path: Optional[Path] = None) -> Tuple[int, s
     env["LIBREOFFICE_BIN"] = settings.libreoffice_bin
     env["PPTX_CONVERT_TIMEOUT_SEC"] = str(settings.pptx_convert_timeout_sec)
     env["OCR_CONFIDENCE_THRESHOLD"] = str(settings.ocr_confidence_threshold)
+    env["PADDLE_PDX_CACHE_HOME"] = str(settings.paddle_pdx_cache_home)
+    env["DOCLING_CACHE_DIR"] = str(settings.docling_cache_dir)
+    if settings.paddleocr_service_url:
+        env["PADDLEOCR_SERVICE_URL"] = settings.paddleocr_service_url
 
     proc = subprocess.run(
         cmd,

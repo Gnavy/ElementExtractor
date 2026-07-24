@@ -383,7 +383,7 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
 
                 task.status = TaskStatus.OCR_RUNNING.value
 
-                task.progress_message = "正在 OCR（Docling + RapidOCR）…"
+                task.progress_message = "正在 OCR（Docling + PaddleOCR）…"
 
                 db.commit()
 

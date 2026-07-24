@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "element-extractor-docling-ppocr"
+version = "0.1.0"
+description = "Local PaddleOCR engine plugin for Docling"
+requires-python = ">=3.11"
+dependencies = ["docling==2.113.0"]
+
+[project.entry-points."docling"]
+element_extractor_ppocr = "element_extractor_docling_ppocr.plugin"
+
+[tool.setuptools]
+packages = ["element_extractor_docling_ppocr"]

@@ -1,0 +1,7 @@
+# PADDLEOCR_SERVICE_URL 远程模式：OCR 原生环境仅需能注册 Docling 插件与发起 HTTP 调用，
+# 不安装 paddlepaddle/paddleocr（真正的推理在 paddleocr_service 容器内）。
+# 用于本地直调模式（未设置 PADDLEOCR_SERVICE_URL）时改装 requirements-ppocr.txt。
+docling==2.113.0
+requests
+pillow
+-e ./docling_ppocr_plugin

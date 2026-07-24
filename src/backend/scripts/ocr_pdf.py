@@ -1,13 +1,14 @@
 """
-Batch convert PDF / PPTX under a project root using Docling (PDF uses RapidOCR).
+Batch convert PDF / PPTX under a project root using Docling + local PaddleOCR.
 PPTX: LibreOffice -> PDF -> Docling OCR. Outputs under ocr_text/ as .md files.
-Run with conda v312:
+Run with conda v312 (or the OCR_PYTHON interpreter):
   conda run -n v312 python scripts/ocr_pdf.py --root /path/to/extract
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -15,6 +16,10 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+
+os.environ.setdefault(
+    "PADDLE_PDX_CACHE_HOME", str(_SCRIPT_DIR.parent / "data" / "paddlex-cache")
+)
 
 from ocr_confidence_export import export_ocr_cells_sidecar  # noqa: E402
 from pptx_to_markdown import pptx_to_markdown  # noqa: E402
@@ -48,12 +53,15 @@ def main() -> int:
 
     try:
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.datamodel.settings import settings as docling_settings
         from docling.document_converter import DocumentConverter, PdfFormatOption
+        from element_extractor_docling_ppocr import PaddleOcrOptions
     except ImportError as exc:
         print(
-            "docling import failed: {exc}\n"
-            "Install in the SAME interpreter Celery uses, e.g.: pip install docling rapidocr onnxruntime\n"
+            "docling/paddleocr import failed: {exc}\n"
+            "Install in the SAME interpreter Celery uses: pip install -r requirements-ppocr.txt\n"
+            "(or requirements-ppocr-client.txt when PADDLEOCR_SERVICE_URL is set)\n"
             "Or set backend env OCR_PYTHON to that interpreter (see src/README.md).".format(
                 exc=exc
             ),
@@ -61,9 +69,15 @@ def main() -> int:
         )
         return 1
 
-    pipeline_options = PdfPipelineOptions()
+    docling_settings.cache_dir = Path(
+        os.environ.get(
+            "DOCLING_CACHE_DIR", _SCRIPT_DIR.parent / "data" / "docling-cache"
+        )
+    )
+
+    pipeline_options = PdfPipelineOptions(allow_external_plugins=True)
     pipeline_options.do_ocr = True
-    pipeline_options.ocr_options = RapidOcrOptions()
+    pipeline_options.ocr_options = PaddleOcrOptions()
     pipeline_options.generate_parsed_pages = True
 
     converter = DocumentConverter(

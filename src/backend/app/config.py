@@ -31,6 +31,12 @@ class Settings(BaseSettings):
         description="?????? docling ? python???? conda run????? OCR_PYTHON?",
     )
     ocr_script: Path = _BACKEND_ROOT / "scripts" / "ocr_pdf.py"
+    paddle_pdx_cache_home: Path = _BACKEND_ROOT / "data" / "paddlex-cache"
+    docling_cache_dir: Path = _BACKEND_ROOT / "data" / "docling-cache"
+    paddleocr_service_url: Optional[str] = Field(
+        default=None,
+        description="设置后 OCR 走该 PaddleOCR 容器服务，不在本地直接调用（PADDLEOCR_SERVICE_URL）",
+    )
     libreoffice_bin: str = Field(
         default="soffice",
         description="LibreOffice soffice，用于 PPTX 转 PDF（环境变量 LIBREOFFICE_BIN）",

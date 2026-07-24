@@ -1,5 +1,5 @@
 """
-Export RapidOCR per-cell confidence from Docling ConversionResult to JSON sidecar.
+Export OCR per-cell confidence from Docling ConversionResult to JSON sidecar.
 """
 
 from __future__ import annotations
