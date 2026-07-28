@@ -36,6 +36,11 @@ def run_ocr(extract_root: Path, log_path: Optional[Path] = None) -> Tuple[int, s
     env["LIBREOFFICE_BIN"] = settings.libreoffice_bin
     env["PPTX_CONVERT_TIMEOUT_SEC"] = str(settings.pptx_convert_timeout_sec)
     env["OCR_CONFIDENCE_THRESHOLD"] = str(settings.ocr_confidence_threshold)
+    # docling 启动时会联网校验 HuggingFace 上的 layout/TableFormer 模型，
+    # 隔离网里连不上要白等约 260 秒（与页数无关）。模型缓存已离线部署，强制走本地。
+    # 副作用：缓存里没有的模型不会自动下载，会直接报错——这是期望行为。
+    env["HF_HUB_OFFLINE"] = "1"
+    env["TRANSFORMERS_OFFLINE"] = "1"
 
     proc = subprocess.run(
         cmd,
