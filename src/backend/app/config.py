@@ -39,6 +39,11 @@ class Settings(BaseSettings):
         default=300,
         description="单个 PPTX 经 LibreOffice 转 PDF 的超时秒数（PPTX_CONVERT_TIMEOUT_SEC）",
     )
+    docling_num_threads: int = Field(
+        default=1,
+        description="docling 的 layout / TableFormer 线程数（DOCLING_NUM_THREADS）。"
+        "浙商 VM 实测多线程是负优化：表格识别 1 线程 38s、4 线程 351s。不影响 OCR",
+    )
 
     llm_provider: str = Field(
         default="anthropic",

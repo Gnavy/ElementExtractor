@@ -41,6 +41,9 @@ def run_ocr(extract_root: Path, log_path: Optional[Path] = None) -> Tuple[int, s
     # 副作用：缓存里没有的模型不会自动下载，会直接报错——这是期望行为。
     env["HF_HUB_OFFLINE"] = "1"
     env["TRANSFORMERS_OFFLINE"] = "1"
+    # docling 未显式设 accelerator_options 时会读这个变量，只作用于 layout/TableFormer，
+    # 不影响走 onnxruntime 的 OCR
+    env["DOCLING_NUM_THREADS"] = str(settings.docling_num_threads)
 
     proc = subprocess.run(
         cmd,
