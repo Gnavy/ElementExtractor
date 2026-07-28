@@ -19,6 +19,7 @@ from app.services.case1_defaults import (
 )
 from app.services.case2_defaults import CASE2_CLASSIFICATION_BASIS, case2_extract_schema_json
 from app.services.paths import ensure_storage, task_upload_collection_storage, task_upload_zip
+from app.services.unzip_service import repair_zip_name
 from app.services.upload_zip_builder import build_zip_from_pairs
 from app.worker_tasks import process_review_task
 
@@ -58,7 +59,8 @@ def form_bool(v: str) -> bool:
 
 
 def _safe_zip_folder_name(value: str, fallback: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
+    # 先还原再截断，否则会把汉字切成半个
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", repair_zip_name(value)).strip(" .")
     return cleaned[:100] or fallback
 
 
@@ -75,7 +77,8 @@ def _unique_zip_path(path: str, used: set[str]) -> str:
 
 
 def _safe_archive_part(value: str, fallback: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
+    # 先还原再截断，同 _safe_zip_folder_name
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", repair_zip_name(value)).strip(" .")
     return cleaned[:100] or fallback
 
 

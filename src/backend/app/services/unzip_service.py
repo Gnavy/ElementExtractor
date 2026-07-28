@@ -11,12 +11,25 @@ def _is_safe_path(base: Path, target: Path) -> bool:
         return False
 
 
-def _decode_zip_name(raw: str) -> str:
-    """Try to fix mojibake from cp437-zipped UTF-8 names (common on Windows)."""
-    try:
-        return raw.encode("cp437").decode("utf-8")
-    except (UnicodeDecodeError, UnicodeEncodeError):
+def repair_zip_name(raw: str) -> str:
+    """还原 cp437 乱码的 zip 中文名；名字被截断过时丢掉尾部残字节"""
+    if raw.isascii():
         return raw
+    try:
+        data = raw.encode("cp437")
+    except UnicodeEncodeError:
+        return raw  # 已是正常中文
+    for drop in range(4):
+        end = len(data) - drop
+        if end <= 0:
+            break  # 丢光会解出空串，整段路径会消失
+        try:
+            fixed = data[:end].decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if fixed:
+            return fixed
+    return raw
 
 
 def extract_zip_archive(zip_path: Path, dest_dir: Path) -> None:
@@ -38,7 +51,7 @@ def extract_zip_archive(zip_path: Path, dest_dir: Path) -> None:
             for p in parts:
                 if p == "":
                     continue
-                decoded_parts.append(_decode_zip_name(p))
+                decoded_parts.append(repair_zip_name(p))
             rel = "/".join(decoded_parts)
             if not rel or rel.endswith("/"):
                 continue
