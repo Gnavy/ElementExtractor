@@ -75,6 +75,11 @@ class Settings(BaseSettings):
         default=0.0,
         description="LLM 温度（LLM_TEMPERATURE）",
     )
+    llm_streaming: bool = Field(
+        default=False,
+        description="LLM 是否流式调用（LLM_STREAMING）。模型服务前有反向代理时须开启，"
+        "否则长请求会被代理的读超时掐断（浙商 VM nginx 为 60 秒）",
+    )
     anthropic_api_key: Optional[str] = Field(
         default=None,
         description="Anthropic API Key（ANTHROPIC_API_KEY）",

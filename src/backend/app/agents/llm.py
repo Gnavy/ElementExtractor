@@ -62,6 +62,7 @@ def get_chat_model(
             "temperature": temp,
             "max_retries": max_retries,
             "timeout": settings.llm_timeout_sec,
+            "streaming": settings.llm_streaming,
         }
         if settings.anthropic_api_key:
             kwargs["api_key"] = settings.anthropic_api_key
@@ -75,6 +76,7 @@ def get_chat_model(
             "temperature": temp,
             "max_retries": max_retries,
             "timeout": settings.llm_timeout_sec,
+            "streaming": settings.llm_streaming,
         }
         if settings.openai_api_key:
             kwargs["api_key"] = settings.openai_api_key
@@ -90,6 +92,7 @@ def get_chat_model(
             "temperature": temp,
             "max_retries": max_retries,
             "timeout": settings.llm_timeout_sec,
+            "streaming": settings.llm_streaming,
             "base_url": settings.zhipu_base_url,
         }
         if settings.zhipu_api_key:
@@ -107,6 +110,7 @@ def get_chat_model(
             "temperature": temp,
             "max_retries": max_retries,
             "timeout": settings.llm_timeout_sec,
+            "streaming": settings.llm_streaming,
             "base_url": settings.bailian_base_url,
             "extra_body": {"enable_thinking": False},
         }
