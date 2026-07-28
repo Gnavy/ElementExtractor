@@ -39,10 +39,20 @@ class Settings(BaseSettings):
         default=300,
         description="单个 PPTX 经 LibreOffice 转 PDF 的超时秒数（PPTX_CONVERT_TIMEOUT_SEC）",
     )
-    docling_num_threads: int = Field(
-        default=1,
-        description="docling 的 layout / TableFormer 线程数（DOCLING_NUM_THREADS）。"
-        "浙商 VM 实测多线程是负优化：表格识别 1 线程 38s、4 线程 351s。不影响 OCR",
+    docling_num_threads: Optional[int] = Field(
+        default=None,
+        description="docling 的 layout / TableFormer 线程数（DOCLING_NUM_THREADS），"
+        "不影响 OCR。留空用 docling 默认值",
+    )
+    omp_wait_policy: str = Field(
+        default="",
+        description="OpenMP 等待策略（OMP_WAIT_POLICY）。虚拟机上建议 PASSIVE，"
+        "ACTIVE 忙等会空转烧 CPU；留空则不注入",
+    )
+    hf_offline: bool = Field(
+        default=False,
+        description="强制 HuggingFace 离线（HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE）。"
+        "隔离网下须开启，否则每次转换白等约 260 秒连接超时",
     )
 
     llm_provider: str = Field(
