@@ -90,6 +90,11 @@ class Settings(BaseSettings):
         description="LLM 停止词（LLM_STOP），逗号分隔，空=不启用、保持原行为；"
         r"支持 \n \t \r 转义，如 \n\n。止损兜底用",
     )
+    llm_enable_thinking: Optional[bool] = Field(
+        default=None,
+        description="是否启用 Qwen thinking（LLM_ENABLE_THINKING）。"
+        "仅用于 OpenAI/vLLM 兼容接口；留空不传参、保持模型服务默认行为",
+    )
     anthropic_api_key: Optional[str] = Field(
         default=None,
         description="Anthropic API Key（ANTHROPIC_API_KEY）",

@@ -52,6 +52,19 @@ def _apply_stop_limits(kwargs: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+def _apply_thinking_mode(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """按需注入 OpenAI/vLLM 的 Qwen thinking 配置。"""
+    if settings.llm_enable_thinking is None:
+        return kwargs
+
+    extra_body = dict(kwargs.get("extra_body") or {})
+    chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+    chat_template_kwargs["enable_thinking"] = settings.llm_enable_thinking
+    extra_body["chat_template_kwargs"] = chat_template_kwargs
+    kwargs["extra_body"] = extra_body
+    return kwargs
+
+
 @lru_cache(maxsize=8)
 def get_chat_model(
     *,
@@ -101,7 +114,7 @@ def get_chat_model(
             kwargs["api_key"] = settings.openai_api_key
         if settings.openai_base_url:
             kwargs["base_url"] = settings.openai_base_url
-        return ChatOpenAI(**_apply_stop_limits(kwargs))
+        return ChatOpenAI(**_apply_thinking_mode(_apply_stop_limits(kwargs)))
 
     if prov == "zhipu":
         from langchain_openai import ChatOpenAI
