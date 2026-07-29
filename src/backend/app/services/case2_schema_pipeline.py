@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -130,6 +131,66 @@ def _count_nonempty_filled_values(data: dict) -> int:
     return n
 
 
+def _is_nonempty(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "null", "none", "nil", "n/a", "na"}
+    return True
+
+
+def _validate_fill_plan_semantics(data: dict) -> tuple[bool, str]:
+    """校验非空字段类型、证据和报告期列的一致性。"""
+    numeric_columns: set[tuple[str, str]] = set()
+    dated_columns: set[tuple[str, str]] = set()
+    non_date_values = 0
+    errors: list[str] = []
+
+    for sheet in data.get("sheets") or []:
+        sheet_name = str(sheet.get("sheet") or sheet.get("name") or "")
+        for item in sheet.get("items") or []:
+            item_id = str(item.get("item_id") or "")
+            has_direct_value = False
+            for key, field in (item.get("fields") or {}).items():
+                if not isinstance(field, dict):
+                    continue
+                value = field.get("value")
+                if not _is_nonempty(value):
+                    continue
+                value_type = str(field.get("value_type") or "")
+                if value_type == "date":
+                    if not isinstance(value, str) or not re.fullmatch(
+                        r"20\d{2}-\d{2}-\d{2}", value.strip()
+                    ):
+                        errors.append(f"{item_id}:{key} 日期格式非法")
+                    dated_columns.add((sheet_name, str(key)))
+                    continue
+
+                non_date_values += 1
+                has_direct_value = True
+                if value_type == "number":
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        errors.append(f"{item_id}:{key} 数值类型非法")
+                    numeric_columns.add((sheet_name, str(key)))
+
+            if (
+                has_direct_value
+                and not (item.get("evidence_refs") or [])
+                and not str(item.get("reason_one_line") or "").startswith("计算规则(")
+            ):
+                errors.append(f"{item_id} 有值但没有来源证据")
+
+    if non_date_values == 0:
+        errors.append("除报告日期外没有任何有效填报数据")
+    missing_dates = sorted(numeric_columns - dated_columns)
+    if missing_dates:
+        errors.append(
+            "已有数值但缺少对应报告日期: "
+            + ", ".join(f"{sheet}:{key}" for sheet, key in missing_dates)
+        )
+    return (not errors, "；".join(errors[:20]))
+
+
 def validate_case2_backfill(extract_root: Path) -> tuple[bool, str]:
     report_path = extract_root / "outputs" / "backfill_report.json"
     filled_path = extract_root / "outputs" / "case2_filled_schema.json"
@@ -144,6 +205,11 @@ def validate_case2_backfill(extract_root: Path) -> tuple[bool, str]:
     written = int(report.get("written_cells") or 0)
     nonempty = _count_nonempty_filled_values(filled)
     item_count = sum(len(sh.get("items") or []) for sh in filled.get("sheets") or [])
+    if item_count > 0 and nonempty == 0:
+        return False, f"Case2 填报结果全空：items={item_count}, filled_nonempty=0"
+    semantic_ok, semantic_msg = _validate_fill_plan_semantics(filled)
+    if item_count > 0 and not semantic_ok:
+        return False, f"Case2 业务校验失败：{semantic_msg}"
     if nonempty > 0 and written == 0:
         return (
             False,

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -44,8 +46,10 @@ def _remark_coords(dim: dict) -> list[str]:
     return [str(c).strip() for c in cells if c]
 
 
-def _iter_fill_plan_writes(data: dict) -> Iterator[tuple[str, str, Any, list[Any]]]:
-    """yield (sheet, cell_coord, value, evidence_refs)"""
+def _iter_fill_plan_writes(
+    data: dict,
+) -> Iterator[tuple[str, str, Any, list[Any], str]]:
+    """yield (sheet, cell_coord, value, evidence_refs, value_type)"""
     for sh in data.get("sheets") or []:
         sheet = sh.get("sheet") or sh.get("name")
         if not sheet:
@@ -61,10 +65,16 @@ def _iter_fill_plan_writes(data: dict) -> Iterator[tuple[str, str, Any, list[Any
                     continue
                 if "value" not in field:
                     continue
-                yield sheet, cell, field.get("value"), evidence_refs
+                yield (
+                    sheet,
+                    cell,
+                    field.get("value"),
+                    evidence_refs,
+                    str(field.get("value_type") or ""),
+                )
             remark = (item.get("fields") or {}).get("remark")
             if isinstance(remark, dict) and remark.get("cell") and reason:
-                yield sheet, remark["cell"], reason, evidence_refs
+                yield sheet, remark["cell"], reason, evidence_refs, "text"
 
 
 def _has_ocr_evidence(data: dict) -> bool:
@@ -88,6 +98,47 @@ def _iter_legacy_dimensions(data: dict) -> Iterator[tuple[str, dict, dict]]:
         for subj in sh.get("subjects") or []:
             for dim in subj.get("dimensions") or []:
                 yield sheet, subj, dim
+
+
+def _is_empty(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"", "null", "none", "nil", "n/a", "na"}
+    return False
+
+
+def _coerce_value(value: Any, value_type: str) -> Any:
+    if _is_empty(value):
+        return None
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if value_type == "number":
+        negative = text.startswith("(") and text.endswith(")")
+        number = text.strip("()").replace(",", "").replace("，", "").strip()
+        if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", number):
+            parsed = float(number)
+            if negative:
+                parsed = -parsed
+            return int(parsed) if parsed.is_integer() else parsed
+    if value_type == "date":
+        normalized = (
+            text.replace("年", "-").replace("月", "-").replace("日", "")
+            .replace("/", "-")
+            .replace(".", "-")
+        )
+        for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+            try:
+                parsed = datetime.strptime(normalized, fmt)
+                if fmt == "%Y":
+                    parsed = parsed.replace(month=12, day=31)
+                elif fmt == "%Y-%m":
+                    parsed = parsed.replace(day=1)
+                return parsed
+            except ValueError:
+                continue
+    return text
 
 
 def main() -> None:
@@ -134,6 +185,8 @@ def main() -> None:
     shutil.copy2(template, out)
     wb = load_workbook(out, read_only=False, data_only=False)
     written = 0
+    target_cells = 0
+    empty_cells = 0
     skipped = 0
     warnings: list[str] = list(warnings_pre)
     use_plan = any((sh.get("items") or []) for sh in data.get("sheets") or [])
@@ -143,8 +196,14 @@ def main() -> None:
         coord: str,
         value: Any,
         evidence_refs: list[Any] | None = None,
+        value_type: str = "",
     ) -> None:
-        nonlocal written, skipped, ocr_low_confidence_cells
+        nonlocal written, target_cells, empty_cells, skipped, ocr_low_confidence_cells
+        target_cells += 1
+        value = _coerce_value(value, value_type)
+        if value is None:
+            empty_cells += 1
+            return
         c = ws[coord]
         if isinstance(c, MergedCell):
             skipped += 1
@@ -156,6 +215,8 @@ def main() -> None:
             warnings.append(f"{ws.title}:{coord} 为公式，已跳过")
             return
         c.value = value
+        if value_type == "date":
+            c.number_format = "yyyy-mm"
         written += 1
 
         if not sidecar_index or evidence_refs is None:
@@ -189,12 +250,14 @@ def main() -> None:
 
     try:
         if use_plan:
-            for sheet, coord, value, evidence_refs in _iter_fill_plan_writes(data):
+            for sheet, coord, value, evidence_refs, value_type in _iter_fill_plan_writes(
+                data
+            ):
                 if sheet not in wb.sheetnames:
                     warnings.append(f"sheet 不存在: {sheet}")
                     skipped += 1
                     continue
-                write_cell(wb[sheet], coord, value, evidence_refs)
+                write_cell(wb[sheet], coord, value, evidence_refs, value_type)
         else:
             for sheet, subj, dim in _iter_legacy_dimensions(data):
                 if not sheet or sheet not in wb.sheetnames:
@@ -226,7 +289,9 @@ def main() -> None:
     rep = {
         "ok": True,
         "format": "fill_plan" if use_plan else "legacy",
+        "target_cells": target_cells,
         "written_cells": written,
+        "empty_cells": empty_cells,
         "skipped_cells": skipped,
         "ocr_sidecar_count": sidecar_count,
         "ocr_confidence_threshold": ocr_threshold,

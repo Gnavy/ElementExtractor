@@ -1,0 +1,636 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+from openpyxl import Workbook, load_workbook
+from pydantic import ValidationError
+
+from app.agents import llm as llm_module
+from app.agents.llm import structured_llm
+from app.agents.nodes.case2.evidence import (
+    _missing_ocr_sources,
+    _route_evidence_chunks,
+    _validate_sheet_identity,
+    build_case2_ocr_chunks,
+    facts_for_fill,
+    facts_for_item_ids,
+)
+from app.agents.nodes.case2.fill_items import _normalize_value
+from app.agents.schemas.case2_item import (
+    Case2BatchFill,
+    Case2ChunkEvidence,
+    Case2ItemFill,
+    Case2PeriodMap,
+)
+from app.services.case2_schema_pipeline import (
+    backfill_case2_schema,
+    validate_case2_backfill,
+)
+
+
+def test_case2_ocr_chunks_cover_entire_markdown(tmp_path: Path):
+    ocr_dir = tmp_path / "ocr_text"
+    ocr_dir.mkdir()
+    markers = [f"MARKER_{index:02d}" for index in range(12)]
+    text = "\n".join(f"{marker} " + ("内容" * 45) for marker in markers)
+    (ocr_dir / "report.md").write_text(text, encoding="utf-8")
+
+    chunks = build_case2_ocr_chunks(tmp_path, max_chars=260, overlap=40)
+
+    assert len(chunks) > 1
+    combined = "\n".join(chunk["text"] for chunk in chunks)
+    assert all(marker in combined for marker in markers)
+    assert {chunk["source_ref"] for chunk in chunks} == {"ocr_text/report.md"}
+
+
+def test_structured_llm_honors_explicit_method_for_openai(monkeypatch):
+    class FakeModel:
+        def __init__(self):
+            self.calls = []
+
+        def with_structured_output(self, schema, *, method):
+            self.calls.append((schema, method))
+            return "bound"
+
+    model = FakeModel()
+    monkeypatch.setattr(llm_module, "_is_bailian_family", lambda: False)
+
+    result = structured_llm(dict, model=model, method="json_mode")
+
+    assert result == "bound"
+    assert model.calls == [(dict, "json_mode")]
+
+
+def test_case2_ocr_chunks_fall_back_to_sidecar(tmp_path: Path):
+    ocr_dir = tmp_path / "ocr_text"
+    ocr_dir.mkdir()
+    (ocr_dir / "scan.pdf.md").write_text("<!-- image -->", encoding="utf-8")
+    (ocr_dir / "scan.pdf.ocr_cells.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {"page": 1, "text": "营业收入 100"},
+                    {"page": 2, "text": "净利润 20"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    chunks = build_case2_ocr_chunks(tmp_path, max_chars=260, overlap=40)
+
+    assert len(chunks) == 1
+    assert "营业收入 100" in chunks[0]["text"]
+    assert "净利润 20" in chunks[0]["text"]
+
+
+def test_case2_ocr_chunks_preserve_scanned_page_markers(tmp_path: Path):
+    ocr_dir = tmp_path / "ocr_text"
+    ocr_dir.mkdir()
+    (ocr_dir / "scan.md").write_text(
+        "<!-- image -->\n第一页 " + ("甲" * 100)
+        + "\n<!-- image -->\n第二页 "
+        + ("乙" * 100),
+        encoding="utf-8",
+    )
+
+    chunks = build_case2_ocr_chunks(tmp_path, max_chars=260, overlap=40)
+
+    assert [chunk["page"] for chunk in chunks] == [1, 2]
+    assert "第一页" in chunks[0]["text"]
+    assert "第二页" in chunks[1]["text"]
+
+
+def test_case2_ocr_chunks_restore_missing_page_header_from_sidecar(
+    tmp_path: Path,
+):
+    ocr_dir = tmp_path / "ocr_text"
+    ocr_dir.mkdir()
+    (ocr_dir / "scan.pdf.md").write_text(
+        "<!-- image -->\n第一页正文 "
+        + ("甲" * 100)
+        + "\n<!-- image -->\n| 营业收入 | 100 |",
+        encoding="utf-8",
+    )
+    (ocr_dir / "scan.pdf.ocr_cells.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "page": 2,
+                        "text": "利润表",
+                        "bbox": [0.4, 0.05, 0.6, 0.1],
+                    },
+                    {
+                        "page": 2,
+                        "text": "2022年12期",
+                        "bbox": [0.4, 0.1, 0.6, 0.15],
+                    },
+                    {
+                        "page": 2,
+                        "text": "营业收入 100",
+                        "bbox": [0.1, 0.5, 0.9, 0.55],
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    chunks = build_case2_ocr_chunks(tmp_path, max_chars=500, overlap=40)
+
+    assert chunks[1]["page"] == 2
+    assert "OCR 页眉补充" in chunks[1]["text"]
+    assert "利润表" in chunks[1]["text"]
+    assert "2022年12期" in chunks[1]["text"]
+    assert "营业收入 100" not in chunks[1]["text"]
+
+
+def test_case2_fact_filter_and_value_normalization():
+    catalog = {
+        "facts": [
+            {"item_id": "利润表:r5", "value": 10},
+            {"item_id": "利润表:r6", "value": 20},
+        ]
+    }
+    assert facts_for_item_ids(catalog, {"利润表:r6"}) == [
+        {"item_id": "利润表:r6", "value": 20}
+    ]
+    assert _normalize_value("1,234.50", "number") == 1234.5
+    assert _normalize_value("(12.5)", "number") == -12.5
+    assert _normalize_value("null", "number") is None
+
+
+def test_case2_schema_rejects_corrupted_structured_output():
+    with pytest.raises(ValidationError):
+        Case2ItemFill(
+            item_id="利润表:r5",
+            fields={"C": {"value": 1}},
+            confidence="reason_one_line",
+        )
+
+
+def test_case2_item_unwraps_json_mode_field_values():
+    item = Case2ItemFill.model_validate(
+        {
+            "item_id": "利润表:r6",
+            "fields": {
+                "C": {
+                    "value": 100,
+                    "evidence": "营业收入 100",
+                }
+            },
+        }
+    )
+
+    assert item.fields == {"C": 100}
+
+
+def test_case2_schema_wraps_single_objects_for_array_fields():
+    evidence = Case2ChunkEvidence.model_validate(
+        {
+            "period_hints": {
+                "statement_name": "利润表",
+                "source_period": "本期金额",
+                "evidence_text": "本期金额",
+            },
+            "facts": {
+                "item_id": "利润表:r6",
+                "subject_name": "营业收入",
+                "source_period": "本期金额",
+                "value": 100,
+                "evidence_text": "营业收入 100",
+            },
+        }
+    )
+    batch = Case2BatchFill.model_validate(
+        {"items": {"item_id": "利润表:r6", "fields": {"C": 100}}}
+    )
+    period_map = Case2PeriodMap.model_validate(
+        {
+            "columns": {
+                "sheet_name": "利润表",
+                "field_key": "C",
+                "column_label": "最近一期",
+            }
+        }
+    )
+
+    assert len(evidence.period_hints) == 1
+    assert len(evidence.facts) == 1
+    assert evidence.facts[0].subject_name == "营业收入"
+    assert len(batch.items) == 1
+    assert len(period_map.columns) == 1
+
+
+def test_case2_period_map_accepts_json_mode_aliases():
+    period_map = Case2PeriodMap.model_validate(
+        {
+            "columns": {
+                "template_column": "C",
+                "report_date": "2023-03-31",
+                "evidence": "最近一期报告",
+            }
+        }
+    )
+
+    assert period_map.columns[0].field_key == "C"
+    assert period_map.columns[0].evidence_text == "最近一期报告"
+
+
+def test_case2_schema_parses_labeled_period_hints():
+    evidence = Case2ChunkEvidence.model_validate(
+        {
+            "period_hints": [
+                "企业主体: 示例公司",
+                "报告日期: 2023年12月31日",
+            ],
+            "facts": [],
+        }
+    )
+
+    assert len(evidence.period_hints) == 1
+    assert evidence.period_hints[0].entity_name == "示例公司"
+    assert evidence.period_hints[0].report_date == "2023年12月31日"
+
+
+def test_case2_fact_ignores_redundant_unknown_fields():
+    evidence = Case2ChunkEvidence.model_validate(
+        {
+            "period_hints": [],
+            "facts": {
+                "item_id": "利润表:r6",
+                "source_period": "本期金额",
+                "value": 100,
+                "evidence_text": "营业收入 100",
+                "period_hints": ["报告日期: 2023年12月31日"],
+            },
+        }
+    )
+
+    assert evidence.facts[0].model_dump().get("period_hints") is None
+
+
+def test_case2_period_hint_without_evidence_is_not_kept(monkeypatch):
+    from app.agents.nodes.case2 import evidence as evidence_module
+
+    class FakeRunnable:
+        def invoke(self, _messages, **_kwargs):
+            return Case2ChunkEvidence.model_validate(
+                {
+                    "period_hints": {
+                        "statement_name": "利润表",
+                        "source_period": "本期金额",
+                    },
+                    "facts": [],
+                }
+            )
+
+    monkeypatch.setattr(
+        evidence_module,
+        "structured_llm",
+        lambda *_args, **_kwargs: FakeRunnable(),
+    )
+
+    result = evidence_module.extract_evidence_chunk_node(
+        {
+            "task_id": "task",
+            "material_chunk": {
+                "source_ref": "ocr_text/report.md",
+                "page": 1,
+                "text": "利润表",
+                "statement_hints": ["利润表"],
+            },
+            "evidence_targets": [],
+            "chunk_index": 0,
+            "total_chunks": 1,
+        }
+    )
+
+    assert result["chunk_evidence"][0]["period_hints"] == []
+
+
+def test_case2_null_fact_is_not_kept(monkeypatch):
+    from app.agents.nodes.case2 import evidence as evidence_module
+
+    class FakeRunnable:
+        def invoke(self, _messages, **_kwargs):
+            return Case2ChunkEvidence.model_validate(
+                {
+                    "period_hints": [],
+                    "facts": {
+                        "item_id": "利润表:r4",
+                        "subject_name": "报告期",
+                        "source_period": "本期金额",
+                        "value": None,
+                        "evidence_text": "2023年12期",
+                    },
+                }
+            )
+
+    monkeypatch.setattr(
+        evidence_module,
+        "structured_llm",
+        lambda *_args, **_kwargs: FakeRunnable(),
+    )
+
+    result = evidence_module.extract_evidence_chunk_node(
+        {
+            "task_id": "task",
+            "material_chunk": {
+                "source_ref": "ocr_text/report.md",
+                "page": 1,
+                "text": "利润表",
+            },
+            "evidence_targets": [{"item_id": "利润表:r4"}],
+            "chunk_index": 0,
+            "total_chunks": 1,
+        }
+    )
+
+    assert result["chunk_evidence"][0]["facts"] == []
+
+
+def test_case2_routes_all_sources_but_only_financial_candidates():
+    chunks = [
+        {
+            "source_ref": "ocr_text/audit.pdf.md",
+            "source_name": "audit.pdf",
+            "text": "合并资产负债表 货币资金 100",
+        },
+        {
+            "source_ref": "ocr_text/audit.pdf.md",
+            "source_name": "audit.pdf",
+            "text": "审计意见和会计政策说明",
+        },
+        {
+            "source_ref": "ocr_text/report.docx.md",
+            "source_name": "report.docx",
+            "text": "利润表分析 营业收入 200",
+        },
+    ]
+    targets = [
+        {
+            "item_id": "资产负债表:r6",
+            "sheet_name": "资产负债表",
+            "label": "货币资金",
+        },
+        {
+            "item_id": "利润表:r6",
+            "sheet_name": "利润表",
+            "label": "营业收入",
+        },
+    ]
+
+    routed, inventory = _route_evidence_chunks(chunks, targets)
+
+    assert len(routed) == 2
+    assert {chunk["source_ref"] for chunk in routed} == {
+        "ocr_text/audit.pdf.md",
+        "ocr_text/report.docx.md",
+    }
+    assert sum(item["total_chunks"] for item in inventory) == 3
+    assert sum(item["candidate_chunks"] for item in inventory) == 2
+
+
+def test_case2_detects_source_without_ocr_text(tmp_path: Path):
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    (source_dir / "a.pdf").write_bytes(b"pdf")
+    (source_dir / "b.docx").write_bytes(b"docx")
+
+    missing = _missing_ocr_sources(
+        tmp_path,
+        [{"source_name": "a.pdf"}],
+    )
+
+    assert missing == ["b.docx"]
+
+
+def test_case2_facts_do_not_mix_entities_or_statement_scopes():
+    catalog = {
+        "facts": [
+            {
+                "item_id": "利润表:r6",
+                "entity_name": "甲公司",
+                "statement_scope": "合并",
+                "statement_name": "利润表",
+                "report_date": "2023-12-31",
+                "value": 100,
+                "source_ref": "ocr_text/a.pdf.md",
+            },
+            {
+                "item_id": "利润表:r6",
+                "entity_name": "乙公司",
+                "statement_scope": "合并",
+                "statement_name": "利润表",
+                "report_date": "2023-12-31",
+                "value": 200,
+                "source_ref": "ocr_text/b.pdf.md",
+            },
+            {
+                "item_id": "利润表:r6",
+                "entity_name": "甲公司",
+                "statement_scope": "母公司",
+                "statement_name": "利润表",
+                "report_date": "2023-12-31",
+                "value": 300,
+                "source_ref": "ocr_text/c.pdf.md",
+            },
+        ]
+    }
+    period_mapping = {
+        "columns": [
+            {
+                "sheet_name": "利润表",
+                "field_key": "C",
+                "entity_name": "甲公司",
+                "statement_scope": "合并",
+                "report_date": "2023-12-31",
+                "source_ref": "ocr_text/a.pdf.md",
+            }
+        ]
+    }
+
+    facts = facts_for_fill(
+        catalog,
+        {"利润表:r6"},
+        sheet_name="利润表",
+        period_mapping=period_mapping,
+    )
+
+    assert [fact["value"] for fact in facts] == [100]
+
+
+def test_case2_facts_match_entity_alias_and_date_format():
+    catalog = {
+        "facts": [
+            {
+                "item_id": "利润表:r6",
+                "entity_name": "东厦",
+                "statement_scope": "合并",
+                "statement_name": "利润表",
+                "report_date": "2022年12月31日",
+                "value": 100,
+                "source_ref": "ocr_text/a.pdf.md",
+            }
+        ]
+    }
+    period_mapping = {
+        "columns": [
+            {
+                "sheet_name": "利润表",
+                "field_key": "D",
+                "entity_name": "东厦建设开发集团有限公司",
+                "statement_scope": "合并",
+                "report_date": "2022-12-31",
+                "source_ref": "ocr_text/a.pdf.md",
+            }
+        ]
+    }
+
+    facts = facts_for_fill(
+        catalog,
+        {"利润表:r6"},
+        sheet_name="利润表",
+        period_mapping=period_mapping,
+    )
+
+    assert [fact["value"] for fact in facts] == [100]
+
+
+def test_case2_period_mapping_rejects_mixed_entities():
+    with pytest.raises(RuntimeError, match="多个企业主体"):
+        _validate_sheet_identity(
+            [
+                {"sheet_name": "利润表", "entity_name": "甲公司"},
+                {"sheet_name": "利润表", "entity_name": "乙公司"},
+            ]
+        )
+
+
+def test_case2_period_mapping_normalizes_entity_abbreviations():
+    columns = [
+        {"sheet_name": "利润表", "entity_name": "东厦"},
+        {
+            "sheet_name": "利润表",
+            "entity_name": "东厦建设开发集团有限公司",
+        },
+    ]
+
+    _validate_sheet_identity(columns)
+
+    assert {column["entity_name"] for column in columns} == {
+        "东厦建设开发集团有限公司"
+    }
+
+
+def test_case2_validation_rejects_all_empty(tmp_path: Path):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "backfill_report.json").write_text(
+        json.dumps({"written_cells": 0}), encoding="utf-8"
+    )
+    (outputs / "case2_filled_schema.json").write_text(
+        json.dumps(
+            {
+                "sheets": [
+                    {
+                        "sheet": "利润表",
+                        "items": [
+                            {
+                                "item_id": "利润表:r5",
+                                "fields": {
+                                    "C": {
+                                        "cell": "C5",
+                                        "value_type": "number",
+                                        "value": None,
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ok, message = validate_case2_backfill(tmp_path)
+
+    assert ok is False
+    assert "全空" in message
+
+
+def test_case2_backfill_counts_only_nonempty_and_writes_real_types(tmp_path: Path):
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    inputs.mkdir()
+    outputs.mkdir()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "利润表"
+    wb.save(inputs / "collection_template.xlsx")
+    wb.close()
+
+    filled = {
+        "sheets": [
+            {
+                "sheet": "利润表",
+                "items": [
+                    {
+                        "item_id": "利润表:r4",
+                        "evidence_refs": ["ocr_text/report.md"],
+                        "fields": {
+                            "C": {
+                                "cell": "C4",
+                                "value_type": "date",
+                                "value": "2023-03-31",
+                            }
+                        },
+                    },
+                    {
+                        "item_id": "利润表:r5",
+                        "evidence_refs": ["ocr_text/report.md"],
+                        "fields": {
+                            "C": {
+                                "cell": "C5",
+                                "value_type": "number",
+                                "value": "1,234.50",
+                            },
+                            "D": {
+                                "cell": "D5",
+                                "value_type": "number",
+                                "value": None,
+                            },
+                        },
+                    },
+                ],
+            }
+        ]
+    }
+    (outputs / "case2_filled_schema.json").write_text(
+        json.dumps(filled, ensure_ascii=False), encoding="utf-8"
+    )
+
+    ok, message = backfill_case2_schema(tmp_path)
+
+    assert ok, message
+    report = json.loads((outputs / "backfill_report.json").read_text())
+    assert report["target_cells"] == 3
+    assert report["written_cells"] == 2
+    assert report["empty_cells"] == 1
+
+    check = load_workbook(outputs / "collection_filled.xlsx", data_only=False)
+    try:
+        assert isinstance(check["利润表"]["C4"].value, datetime)
+        assert check["利润表"]["C5"].value == 1234.5
+        assert check["利润表"]["D5"].value is None
+    finally:
+        check.close()

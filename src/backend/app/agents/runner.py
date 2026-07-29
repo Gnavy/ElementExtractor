@@ -78,6 +78,7 @@ def run_agent(
             builder = _select_builder(kind)
             graph = builder(checkpointer=checkpointer)
             config = thread_config(task_id or extract_root.name)
+            config["max_concurrency"] = max(1, settings.agent_parallel_workers)
             # Stream updates for progress
             for event in graph.stream(
                 initial,

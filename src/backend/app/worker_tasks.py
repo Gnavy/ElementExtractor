@@ -103,6 +103,25 @@ def _case1_outputs_ready(outputs_dir: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _case2_outputs_ready(outputs_dir: Path) -> tuple[bool, str]:
+    """Case2：产物存在且业务校验通过才算可用。"""
+    ok, msg = _case1_outputs_ready(outputs_dir)
+    if not ok:
+        return ok, msg
+    extract_root = outputs_dir.parent
+    if not has_case2_filled_schema(extract_root):
+        return False, "缺少有效的 outputs/case2_filled_schema.json"
+    return validate_case2_backfill(extract_root)
+
+
+def _template_outputs_ready(
+    task_kind: str, outputs_dir: Path
+) -> tuple[bool, str]:
+    if task_kind == "case2":
+        return _case2_outputs_ready(outputs_dir)
+    return _case1_outputs_ready(outputs_dir)
+
+
 def _build_result_outputs(outputs_dir: Path, *, is_case1: bool, run_collection_fill: bool) -> dict:
     outs: dict[str, str] = {
         "classification": "outputs/classification.json",
@@ -482,7 +501,7 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
             log_tail = ""
             err_tail = ""
 
-            if is_template_case and _case1_outputs_ready(outputs_dir)[0]:
+            if is_template_case and _template_outputs_ready(task_kind, outputs_dir)[0]:
                 if is_case2 and not has_case2_filled_schema(extract_root):
                     skip_agent_run = False
                 elif is_case1:
@@ -505,7 +524,7 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
                 br_ok, br_msg = (
                     validate_case2_backfill(extract_root) if bf_ok else (False, bf_log)
                 )
-                if bf_ok and br_ok and _case1_outputs_ready(outputs_dir)[0]:
+                if bf_ok and br_ok and _case2_outputs_ready(outputs_dir)[0]:
                     skip_agent_run = True
                     log_tail = (
                         f"[续跑回填] calc={calc_log}\n{bf_log}\n[校验] {br_msg}"
@@ -545,7 +564,7 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
                     return {"ok": False, "error": task.error_message}
 
             if is_template_case:
-                if not _case1_outputs_ready(outputs_dir)[0] and is_case1:
+                if is_case1 and not _case1_outputs_ready(outputs_dir)[0]:
                     fb_ok, fb_log = try_fill_case1_collection_from_elements(
                         extract_root
                     )
@@ -554,7 +573,9 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
                         (outputs_dir / "collection_fill_fallback.log").write_text(
                             fb_log, encoding="utf-8"
                         )
-                outputs_ok, outputs_err = _case1_outputs_ready(outputs_dir)
+                outputs_ok, outputs_err = _template_outputs_ready(
+                    task_kind, outputs_dir
+                )
             else:
                 outputs_ok, outputs_err = _review_outputs_ready_for_kind(
                     task_kind, outputs_dir
@@ -607,7 +628,7 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
             return {"ok": False, "error": task.error_message}
 
         if is_template_case and want_agent:
-            ok, err = _case1_outputs_ready(outputs_dir)
+            ok, err = _template_outputs_ready(task_kind, outputs_dir)
             if not ok:
                 task.status = TaskStatus.FAILED.value
                 task.error_message = err
@@ -645,6 +666,10 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
             outs["case2_fill_schema"] = "outputs/case2_fill_schema.json"
         if is_case2 and (outputs_dir / "case2_filled_schema.json").is_file():
             outs["case2_filled_schema"] = "outputs/case2_filled_schema.json"
+        if is_case2 and (outputs_dir / "case2_evidence_catalog.json").is_file():
+            outs["case2_evidence_catalog"] = "outputs/case2_evidence_catalog.json"
+        if is_case2 and (outputs_dir / "case2_period_map.json").is_file():
+            outs["case2_period_map"] = "outputs/case2_period_map.json"
         if is_case2 and (outputs_dir / "backfill_report.json").is_file():
             outs["backfill_report"] = "outputs/backfill_report.json"
         if is_case2 and (outputs_dir / "calc_rules_report.json").is_file():
@@ -681,5 +706,3 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
     finally:
 
         db.close()
-
-

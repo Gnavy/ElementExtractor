@@ -90,6 +90,12 @@ class Case2State(BaseAgentState, total=False):
     fill_schema: dict[str, Any]
     filled_schema: Annotated[dict[str, Any], _last_value]
     item_batches: list[list[dict[str, Any]]]
+    material_chunks: list[dict[str, Any]]
+    evidence_targets: list[dict[str, str]]
+    source_inventory: list[dict[str, Any]]
+    chunk_evidence: Annotated[list[dict[str, Any]], _append_list]
+    evidence_catalog: Annotated[dict[str, Any], _last_value]
+    period_mapping: Annotated[dict[str, Any], _last_value]
     filled_items: Annotated[list[dict[str, Any]], _append_list]
     items_to_retry: Annotated[list[str], _last_value]
     user_rules: str
@@ -107,5 +113,17 @@ class Case2BatchState(TypedDict, total=False):
     column_headers: dict[str, Any]
     user_rules: str
     context_snippets: str
+    evidence_catalog: dict[str, Any]
+    period_mapping: dict[str, Any]
     batch_index: int
     total_batches: int
+
+
+class Case2EvidenceChunkState(TypedDict, total=False):
+    """Payload for Send() OCR evidence extraction workers."""
+
+    task_id: str
+    material_chunk: dict[str, Any]
+    evidence_targets: list[dict[str, str]]
+    chunk_index: int
+    total_chunks: int

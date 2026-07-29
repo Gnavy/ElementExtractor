@@ -237,8 +237,16 @@ class _BailianStructuredRunnable:
         )
 
 
-def structured_llm(schema: type, *, model: BaseChatModel | None = None):
-    """Return LLM bound to a Pydantic structured output schema."""
+def structured_llm(
+    schema: type,
+    *,
+    model: BaseChatModel | None = None,
+    method: str | None = None,
+):
+    """Return LLM bound to a Pydantic structured output schema.
+
+    ``method`` 只覆盖非百炼 provider；百炼继续优先 function calling。
+    """
     llm = model or get_chat_model()
 
     # 百炼对 json_object/json_schema 常返回空对象；function_calling 更可靠。
@@ -249,6 +257,9 @@ def structured_llm(schema: type, *, model: BaseChatModel | None = None):
         except Exception:  # noqa: BLE001
             bound = llm.with_structured_output(schema, method="json_mode")
         return _BailianStructuredRunnable(bound)
+
+    if method:
+        return llm.with_structured_output(schema, method=method)
 
     try:
         return llm.with_structured_output(schema, method="json_schema")
