@@ -33,6 +33,25 @@ def _bailian_api_key() -> str | None:
     return settings.bailian_api_key or settings.dashscope_api_key or settings.openai_api_key
 
 
+def _apply_stop_limits(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """按需注入 max_tokens 与 stop 止损参数。
+
+    默认（未配置 LLM_MAX_TOKENS / LLM_STOP）不改动 kwargs，行为与原来完全一致；
+    仅当 .env 显式设置时才生效（VM 特殊处理）。
+    """
+    if settings.llm_max_tokens:
+        kwargs["max_tokens"] = settings.llm_max_tokens
+    raw = settings.llm_stop or ""
+    stop = [
+        s.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+        for s in raw.split(",")
+        if s
+    ]
+    if stop:
+        kwargs["stop"] = stop
+    return kwargs
+
+
 @lru_cache(maxsize=8)
 def get_chat_model(
     *,
@@ -82,7 +101,7 @@ def get_chat_model(
             kwargs["api_key"] = settings.openai_api_key
         if settings.openai_base_url:
             kwargs["base_url"] = settings.openai_base_url
-        return ChatOpenAI(**kwargs)
+        return ChatOpenAI(**_apply_stop_limits(kwargs))
 
     if prov == "zhipu":
         from langchain_openai import ChatOpenAI
@@ -99,7 +118,7 @@ def get_chat_model(
             kwargs["api_key"] = settings.zhipu_api_key
         elif settings.openai_api_key:
             kwargs["api_key"] = settings.openai_api_key
-        return ChatOpenAI(**kwargs)
+        return ChatOpenAI(**_apply_stop_limits(kwargs))
 
     if _is_bailian_family(prov):
         from langchain_openai import ChatOpenAI
@@ -117,7 +136,7 @@ def get_chat_model(
         api_key = _bailian_api_key()
         if api_key:
             kwargs["api_key"] = api_key
-        return ChatOpenAI(**kwargs)
+        return ChatOpenAI(**_apply_stop_limits(kwargs))
 
     raise ValueError(
         f"未知 LLM_PROVIDER={prov!r}，支持：anthropic | openai | zhipu | bailian"

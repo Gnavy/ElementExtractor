@@ -80,6 +80,16 @@ class Settings(BaseSettings):
         description="LLM 是否流式调用（LLM_STREAMING）。模型服务前有反向代理时须开启，"
         "否则长请求会被代理的读超时掐断（浙商 VM nginx 为 60 秒）",
     )
+    llm_max_tokens: int = Field(
+        default=0,
+        description="LLM 单次输出上限（LLM_MAX_TOKENS）。0=不限制、保持原行为；"
+        "止损用：某些量化模型在结构化输出下 EOS 失效会无限生成，设上限强制截断",
+    )
+    llm_stop: str = Field(
+        default="",
+        description="LLM 停止词（LLM_STOP），逗号分隔，空=不启用、保持原行为；"
+        r"支持 \n \t \r 转义，如 \n\n。止损兜底用",
+    )
     anthropic_api_key: Optional[str] = Field(
         default=None,
         description="Anthropic API Key（ANTHROPIC_API_KEY）",
