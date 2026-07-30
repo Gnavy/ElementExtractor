@@ -510,6 +510,91 @@ def test_template_checks_mark_unsupported_formula_as_unchecked(tmp_path: Path):
     assert any(f["kind"] == "template_check_unparsed" for f in check_review_flags(outcomes))
 
 
+def test_case2_unmapped_column_is_excluded_from_filling():
+    """未确定报告期的列不得参与填报，否则会填出不知属于哪一期的数值。"""
+    from app.agents.nodes.case2.fill_items import _drop_unmapped_columns
+
+    batches = [
+        {
+            "sheet_name": "利润表",
+            "column_headers": {"C": "最近一期", "F": "上上期"},
+            "items": [
+                {
+                    "item_id": "利润表:r6",
+                    "fields": {
+                        "C": {"cell": "C6", "value": None},
+                        "F": {"cell": "F6", "value": None},
+                    },
+                }
+            ],
+        }
+    ]
+    period_mapping = {
+        "columns": [
+            {"sheet_name": "利润表", "field_key": "C", "report_date": "2023-12-31"},
+            {"sheet_name": "利润表", "field_key": "F", "report_date": None},
+        ]
+    }
+
+    dropped = _drop_unmapped_columns(batches, period_mapping)
+
+    assert dropped == 1
+    assert list(batches[0]["column_headers"]) == ["C"]
+    assert list(batches[0]["items"][0]["fields"]) == ["C"]
+
+
+def test_case2_period_matching_ignores_source_file_boundary():
+    """同一报告期的数据可能散落在多份材料里，来源文件只作排序偏好。"""
+    from app.agents.nodes.case2.evidence import _enrich_validated_column
+
+    entries = [
+        {
+            "entity_name": "新鸿隆祥地产集团有限公司",
+            "statement_scope": "合并",
+            "statement_name": "利润表",
+            "report_date": "2021-12-31",
+            "source_ref": "ocr_text/sources/2021.pdf.md",
+            "evidence_text": "本期数",
+        }
+    ]
+    # 列指向 2022 年报告（比较列），事实却在 2021 年报告里
+    column = {
+        "sheet_name": "利润表",
+        "field_key": "E",
+        "entity_name": "新鸿隆祥地产集团有限公司",
+        "statement_scope": "合并",
+        "statement_name": "利润表",
+        "report_date": "2021-12-31",
+        "source_ref": "ocr_text/sources/2022.pdf.md",
+    }
+
+    out = _enrich_validated_column(column, sheet_name="利润表", entries=entries)
+
+    assert out["report_date"] == "2021-12-31"
+
+
+def test_case2_period_date_recovered_from_evidence_text():
+    """模型把推断出的日期只写进说明文本时取回；只有年份则不取。"""
+    from app.agents.nodes.case2.evidence import _recover_report_date
+
+    mapped = {
+        "report_date": None,
+        "evidence_text": "2022年审计报告利润表显示'上年累计金额'列，对应上一年度2021-12-31。",
+    }
+    assert _recover_report_date(mapped) is True
+    assert mapped["report_date"] == "2021-12-31"
+
+    vague = {
+        "report_date": None,
+        "evidence_text": "源材料中未提供2020年审计报告，根据序列推断为2020年，但无直接证据。",
+    }
+    assert _recover_report_date(vague) is False
+    assert vague["report_date"] is None
+
+    already = {"report_date": "2023-12-31", "evidence_text": "对应最新报告期2023-12-31。"}
+    assert _recover_report_date(already) is False
+
+
 def test_case2_period_map_accepts_unmappable_column_with_blank_fields():
     """材料缺某一期时模型会把该列各字段留空，不能让整份映射解析失败。"""
     period_map = Case2PeriodMap.model_validate(
@@ -837,7 +922,8 @@ def test_case2_unmapped_column_reason_is_not_reported_as_missing_source():
     assert items[0]["reason_one_line"].count("未映射成功") == 1
 
 
-def test_case2_facts_do_not_mix_entities_or_statement_scopes():
+def test_case2_facts_keep_one_subject_but_never_mix_statement_scopes():
+    """一个任务默认一家公司，主体名不再过滤；合并与母公司仍不得混填。"""
     catalog = {
         "facts": [
             {
@@ -889,7 +975,8 @@ def test_case2_facts_do_not_mix_entities_or_statement_scopes():
         period_mapping=period_mapping,
     )
 
-    assert [fact["value"] for fact in facts] == [100]
+    # 主体名写法不同的证据照常参与；母公司口径的那条仍被排除
+    assert sorted(fact["value"] for fact in facts) == [100, 200]
 
 
 def test_case2_facts_match_entity_alias_and_date_format():
@@ -929,12 +1016,22 @@ def test_case2_facts_match_entity_alias_and_date_format():
     assert [fact["value"] for fact in facts] == [100]
 
 
-def test_case2_period_mapping_rejects_mixed_entities():
-    with pytest.raises(RuntimeError, match="多个企业主体"):
+def test_case2_period_mapping_does_not_abort_on_differing_entity_names():
+    """一个任务默认一家公司：列上主体名不同不再终止任务，交复核提示处理。"""
+    columns = [
+        {"sheet_name": "利润表", "entity_name": "甲公司"},
+        {"sheet_name": "利润表", "entity_name": "乙公司"},
+    ]
+
+    _validate_sheet_identity(columns)
+
+
+def test_case2_period_mapping_still_rejects_mixed_statement_scopes():
+    with pytest.raises(RuntimeError, match="多个报表口径"):
         _validate_sheet_identity(
             [
-                {"sheet_name": "利润表", "entity_name": "甲公司"},
-                {"sheet_name": "利润表", "entity_name": "乙公司"},
+                {"sheet_name": "利润表", "statement_scope": "合并"},
+                {"sheet_name": "利润表", "statement_scope": "母公司"},
             ]
         )
 
@@ -951,16 +1048,6 @@ def test_case2_period_mapping_unifies_entity_ocr_variants():
 
     # 统一到出现频次最高的写法，而不是被认错的那个
     assert {column["entity_name"] for column in columns} == {"东厦建设开发集团有限公司"}
-
-
-def test_case2_period_mapping_still_rejects_real_different_companies():
-    with pytest.raises(RuntimeError, match="多个企业主体"):
-        _validate_sheet_identity(
-            [
-                {"sheet_name": "资产负债表", "entity_name": "山东尊创置业有限公司"},
-                {"sheet_name": "资产负债表", "entity_name": "山东新鸿置业有限公司"},
-            ]
-        )
 
 
 def test_case2_period_mapping_normalizes_entity_abbreviations():

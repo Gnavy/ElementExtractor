@@ -21,6 +21,7 @@ _KIND_TITLES = {
     "template_placeholder_cleared": "已清除未填单元格中的模板提示文字",
     "template_check_failed": "模板核查检验未通过",
     "template_check_unparsed": "部分模板公式未参与校验",
+    "period_date_from_evidence_text": "报告期取自证据说明文本",
 }
 
 

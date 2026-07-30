@@ -724,9 +724,6 @@ def _matching_period_evidence(
     if report_date is None:
         return []
     expected_statement = _normalize_statement(column.get("statement_name"))
-    # 比对交给 _entity_names_compatible，这里保留原始写法，别提前把括号批注抹掉
-    expected_entity_raw = str(column.get("entity_name") or "")
-    expected_entity = _normalize_text(expected_entity_raw)
     expected_scope = _normalize_scope(column.get("statement_scope"))
     expected_ref = str(column.get("source_ref") or "")
 
@@ -737,19 +734,30 @@ def _matching_period_evidence(
         statement = _normalize_statement(entry.get("statement_name"))
         if expected_statement and statement and statement != expected_statement:
             continue
-        entity = _normalize_text(entry.get("entity_name"))
-        if expected_entity and entity and not _entity_names_compatible(
-            expected_entity_raw, entry.get("entity_name")
-        ):
-            continue
         scope = _normalize_scope(entry.get("statement_scope"))
         if expected_scope and scope and scope != expected_scope:
             continue
-        source_ref = str(entry.get("source_ref") or "")
-        if expected_ref and source_ref != expected_ref:
-            continue
         matched.append(entry)
+    # 同一报告期的数据可能散落在多份材料里（本期数在当年报告、比较数在次年报告），
+    # 来源文件只作排序偏好，不作过滤条件
+    if expected_ref:
+        matched.sort(key=lambda e: str(e.get("source_ref") or "") != expected_ref)
     return matched
+
+
+def _recover_report_date(data: dict[str, Any]) -> bool:
+    """列未给出报告期时，从证据文本里取回明确写出的日期。
+
+    取回的日期仍须由事实匹配确认，匹配不上照旧作未映射处理。
+    """
+    if _parse_date(data.get("report_date")) is not None:
+        return False
+    for key in ("source_period", "evidence_text"):
+        parsed = _parse_date(data.get(key))
+        if parsed is not None:
+            data["report_date"] = parsed.isoformat()
+            return True
+    return False
 
 
 def _enrich_validated_column(
@@ -764,7 +772,10 @@ def _enrich_validated_column(
         _normalize_statement(data.get("statement_name"))
         or _normalize_statement(sheet_name)
     )
+    recovered = _recover_report_date(data)
     matched = _matching_period_evidence(entries, data)
+    if recovered and matched:
+        data["date_from_evidence_text"] = True
     if not matched:
         data["report_date"] = None
         data["source_ref"] = None
@@ -898,14 +909,11 @@ def _validate_sheet_identity(
             for column in sheet_columns:
                 if column.get("entity_name"):
                     column["entity_name"] = canonical_entity
-        entities = {_normalize_text(name) for name in entity_names}
         scopes = {
             _normalize_scope(column.get("statement_scope"))
             for column in sheet_columns
             if _normalize_scope(column.get("statement_scope"))
         }
-        if len(entities) > 1 and not canonical_entity:
-            raise RuntimeError(f"Case2 {sheet_name} 期次映射混入多个企业主体")
         if len(scopes) > 1:
             raise RuntimeError(f"Case2 {sheet_name} 期次映射混入多个报表口径")
 
@@ -1034,15 +1042,41 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
         )
+    for column in period_map["columns"]:
+        if not column.pop("date_from_evidence_text", False):
+            continue
+        review_flags.append(
+            {
+                "kind": "period_date_from_evidence_text",
+                "sheet_name": column.get("sheet_name"),
+                "field_key": column.get("field_key"),
+                "detail": (
+                    f"{column.get('field_key')} 列（{column.get('column_label')}）"
+                    f"的报告期 {column.get('report_date')} 取自证据说明文本，"
+                    "已由事实匹配确认，仍建议复核该列期次"
+                ),
+            }
+        )
     variants = _entity_variants(catalog)
     if len(variants) > 1:
-        merged = _fuzzy_entity_pairs(catalog)
-        detail = "证据中出现多个公司名称写法：" + "、".join(variants)
-        if merged:
-            detail += "；其中 " + "、".join(
-                f"「{left}」与「{right}」" for left, right in merged
-            ) + " 已按同一主体的 OCR 变体处理，请确认确为同一家公司"
-        review_flags.append({"kind": "entity_variants", "detail": detail})
+        counts: dict[str, int] = {}
+        for fact in catalog.get("facts") or []:
+            name = str(fact.get("entity_name") or "").strip()
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        listed = "、".join(
+            f"{name}（{counts.get(name, 0)} 条）"
+            for name in sorted(variants, key=lambda n: -counts.get(n, 0))
+        )
+        review_flags.append(
+            {
+                "kind": "entity_variants",
+                "detail": (
+                    f"证据中出现 {len(variants)} 种公司名称写法：{listed}；"
+                    "已按同一任务同一主体处理，若材料中确实混入了其他公司请重新分开建任务"
+                ),
+            }
+        )
     review_flags.extend(_carryforward_review_flags(catalog))
     period_map["review_flags"] = review_flags
     add_review_flags(root, review_flags, stage="map_periods")
@@ -1081,11 +1115,6 @@ def facts_for_fill(
         for column in period_mapping.get("columns") or []
         if str(column.get("sheet_name") or "") == sheet_name
     ]
-    entities = {
-        str(column.get("entity_name") or "").strip()
-        for column in columns
-        if _normalize_text(column.get("entity_name"))
-    }
     scopes = {
         _normalize_scope(column.get("statement_scope"))
         for column in columns
@@ -1096,11 +1125,6 @@ def facts_for_fill(
         for column in columns
         if (parsed := _parse_date(column.get("report_date"))) is not None
     }
-    source_refs = {
-        str(column.get("source_ref") or "")
-        for column in columns
-        if column.get("source_ref")
-    }
     statement_name = _normalize_statement(sheet_name)
 
     filtered: list[dict[str, Any]] = []
@@ -1108,19 +1132,8 @@ def facts_for_fill(
         fact_statement = _normalize_statement(fact.get("statement_name"))
         if fact_statement and statement_name and fact_statement != statement_name:
             continue
-        fact_entity = str(fact.get("entity_name") or "").strip()
         fact_scope = _normalize_scope(fact.get("statement_scope"))
-        fact_ref = str(fact.get("source_ref") or "")
-        if entities and fact_entity and not any(
-            _entity_names_compatible(fact_entity, entity)
-            for entity in entities
-        ):
-            continue
         if scopes and fact_scope and fact_scope not in scopes:
-            continue
-        if entities and not fact_entity and source_refs and fact_ref not in source_refs:
-            continue
-        if scopes and not fact_scope and source_refs and fact_ref not in source_refs:
             continue
         fact_date_text = str(fact.get("report_date") or "")
         fact_date = _parse_date(fact_date_text)

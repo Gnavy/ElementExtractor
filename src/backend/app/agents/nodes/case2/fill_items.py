@@ -37,10 +37,46 @@ def _batch_items(schema: dict, batch_size: int = 8) -> list[dict[str, Any]]:
     return batches
 
 
+def _mapped_columns(period_mapping: dict[str, Any]) -> dict[str, set[str]]:
+    """按 sheet 收集已确定报告期的列。"""
+    mapped: dict[str, set[str]] = {}
+    for column in period_mapping.get("columns") or []:
+        if not column.get("report_date"):
+            continue
+        sheet = str(column.get("sheet_name") or "")
+        mapped.setdefault(sheet, set()).add(str(column.get("field_key") or ""))
+    return mapped
+
+
+def _drop_unmapped_columns(
+    batches: list[dict[str, Any]], period_mapping: dict[str, Any]
+) -> int:
+    """未确定报告期的列不参与填报，避免填出不知属于哪一期的数值。"""
+    mapped = _mapped_columns(period_mapping)
+    if not mapped:
+        return 0
+    dropped = 0
+    for batch in batches:
+        allowed = mapped.get(str(batch.get("sheet_name") or ""))
+        if allowed is None:
+            continue
+        headers = batch.get("column_headers") or {}
+        batch["column_headers"] = {
+            key: label for key, label in headers.items() if key in allowed
+        }
+        for item in batch.get("items") or []:
+            fields = item.get("fields") or {}
+            for key in [k for k in fields if k not in allowed]:
+                fields.pop(key)
+                dropped += 1
+    return dropped
+
+
 def prepare_batches_node(state: dict[str, Any]) -> dict[str, Any]:
     schema = state.get("fill_schema") or {}
     retry_ids = set(state.get("items_to_retry") or [])
     batches = _batch_items(schema, batch_size=6)
+    dropped = _drop_unmapped_columns(batches, state.get("period_mapping") or {})
     if retry_ids:
         # Rebuild batches only with retry items
         filtered: list[dict[str, Any]] = []
@@ -49,9 +85,12 @@ def prepare_batches_node(state: dict[str, Any]) -> dict[str, Any]:
             if items:
                 filtered.append({**b, "items": items})
         batches = filtered
+    log_lines = [f"待填批次={len(batches)}"]
+    if dropped:
+        log_lines.append(f"未映射列已移出填报范围，涉及 {dropped} 个字段")
     return {
         "item_batches": batches,
-        "log_lines": [f"待填批次={len(batches)}"],
+        "log_lines": log_lines,
         "progress": f"准备填报 {len(batches)} 批",
     }
 
@@ -302,7 +341,10 @@ def merge_schema_node(state: dict[str, Any]) -> dict[str, Any]:
     )
     by_id = {it.get("item_id"): it for it in (state.get("filled_items") or [])}
 
+    mapped = _mapped_columns(state.get("period_mapping") or {})
+
     for sh in schema.get("sheets") or []:
+        allowed = mapped.get(str(sh.get("sheet") or sh.get("name") or ""))
         for item in sh.get("items") or []:
             fid = item.get("item_id")
             upd = by_id.get(fid)
@@ -311,6 +353,9 @@ def merge_schema_node(state: dict[str, Any]) -> dict[str, Any]:
             field_vals = upd.get("fields") or {}
             for key, field in (item.get("fields") or {}).items():
                 if not isinstance(field, dict):
+                    continue
+                if allowed is not None and key not in allowed:
+                    field["value"] = None
                     continue
                 if key in field_vals:
                     val = field_vals[key]
