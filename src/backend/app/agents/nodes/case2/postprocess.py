@@ -4,11 +4,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.agents.tools.context import write_json
 from app.services.case2_review import add_review_flags, append_review_section
 from app.services.case2_schema_pipeline import (
     apply_case2_calc_rules,
     backfill_case2_schema,
     validate_case2_backfill,
+)
+from app.services.case2_template_checks import (
+    check_review_flags,
+    evaluate_checks,
+    read_template_checks,
+    summarize,
 )
 
 
@@ -39,15 +46,62 @@ def apply_calc_node(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _run_template_checks(root: Path) -> tuple[list[dict[str, Any]], str]:
+    """用模板自带的核查检验公式核对产物。只读，不回写公式格。"""
+    filled = root / "outputs" / "collection_filled.xlsx"
+    if not filled.is_file():
+        return [], ""
+    try:
+        checks = read_template_checks(filled)
+        outcomes = evaluate_checks(filled, checks)
+    except Exception as exc:  # noqa: BLE001 — 核查失败不应连累任务
+        return (
+            [
+                {
+                    "kind": "template_check_unparsed",
+                    "detail": f"模板核查检验执行失败，本次未校验：{exc}",
+                }
+            ],
+            "模板核查=执行失败",
+        )
+    stats = summarize(outcomes)
+    write_json(root / "outputs" / "template_check_report.json", {
+        "summary": stats,
+        "failed": [
+            {
+                "sheet": o.check.sheet,
+                "cell": o.check.cell,
+                "message": o.check.message,
+                "delta": o.delta,
+                "empty_refs": o.empty_refs,
+                "suspect_cells": o.delta_matches,
+                "solved": (
+                    {"cell": o.suggestion[0], "value": o.suggestion[1]}
+                    if o.suggestion
+                    else None
+                ),
+            }
+            for o in outcomes
+            if o.ok is False
+        ],
+    })
+    log = (
+        f"模板核查={stats['passed']}/{stats['checks']} 通过"
+        f"，未通过 {stats['failed']}，未校验 {stats['unchecked']}"
+    )
+    return check_review_flags(outcomes), log
+
+
 def backfill_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     ok, log = backfill_case2_schema(root)
     br_ok, br_msg = (False, "")
     if ok:
         br_ok, br_msg = validate_case2_backfill(root)
+    check_flags, check_log = _run_template_checks(root)
     add_review_flags(
         root,
-        _report_review_flags(root, "backfill_report.json"),
+        _report_review_flags(root, "backfill_report.json") + check_flags,
         stage="backfill",
     )
     # 复核提示只提示，不改变任务成败判定
@@ -61,6 +115,7 @@ def backfill_node(state: dict[str, Any]) -> dict[str, Any]:
         "log_lines": [
             f"backfill: {log[-300:]}",
             f"validate: {br_msg}",
+            check_log or "模板核查=无公式可用",
             f"需人工复核={review_count} 条",
         ],
         "progress": "xlsx 回填完成" if ok else "xlsx 回填失败",

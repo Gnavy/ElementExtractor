@@ -19,6 +19,8 @@ _KIND_TITLES = {
     "carryforward_mismatch": "期间存在歧义（年初数与上期期末数对不上）",
     "calc_incomplete_sources": "合计项缺少组成项目，未计算",
     "template_placeholder_cleared": "已清除未填单元格中的模板提示文字",
+    "template_check_failed": "模板核查检验未通过",
+    "template_check_unparsed": "部分模板公式未参与校验",
 }
 
 

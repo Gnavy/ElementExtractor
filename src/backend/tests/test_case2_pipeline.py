@@ -417,6 +417,99 @@ def test_case2_detects_source_without_ocr_text(tmp_path: Path):
     assert missing == ["b.docx"]
 
 
+def _template_check_book(tmp_path: Path, formulas: dict[str, str], values: dict):
+    """造一张带核查公式的小模板，行为与客户模板同构。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "资产负债表"
+    for coord, value in values.items():
+        ws[coord] = value
+    for coord, formula in formulas.items():
+        ws[coord] = formula
+    path = tmp_path / "filled.xlsx"
+    wb.save(path)
+    return path
+
+
+def test_template_checks_report_delta_and_locate_suspect_cell(tmp_path: Path):
+    from app.services.case2_template_checks import (
+        evaluate_checks,
+        read_template_checks,
+        summarize,
+    )
+
+    # 归母 + 少数股东权益 = 所有者权益合计，此处归母被漏填成 0
+    path = _template_check_book(
+        tmp_path,
+        {
+            "C50": '=IF(ABS(SUM(C10:C11)-C12)<1,"无误","所有者权益合计有误")',
+            "C51": '=IF(ABS(SUM(C10:C11)-C12)<1,"无误","另一条")',
+        },
+        {"C10": 0, "C11": 46_418_122.14, "C12": 106_959_211.58},
+    )
+    outcomes = evaluate_checks(path, read_template_checks(path))
+    assert summarize(outcomes)["failed"] == 2
+    failed = outcomes[0]
+    assert failed.check.message == "所有者权益合计有误"
+    assert abs(failed.delta + 60_541_089.44) < 0.01
+
+
+def test_template_checks_flag_cell_equal_to_delta(tmp_path: Path):
+    """差额恰好等于某个被引用格的值时，要把那一格点出来。"""
+    from app.services.case2_template_checks import evaluate_checks, read_template_checks
+
+    # C11 被重复计入，差额正好等于 C11
+    path = _template_check_book(
+        tmp_path,
+        {"C50": '=IF(ABS(SUM(C10:C11)-C12)<1,"无误","合计有误")'},
+        {"C10": 100.0, "C11": 25.0, "C12": 100.0},
+    )
+    outcome = evaluate_checks(path, read_template_checks(path))[0]
+    assert outcome.ok is False
+    assert outcome.delta_matches == ["C11"]
+
+
+def test_template_checks_solve_single_empty_cell(tmp_path: Path):
+    from app.services.case2_template_checks import evaluate_checks, read_template_checks
+
+    path = _template_check_book(
+        tmp_path,
+        {"C50": '=IF(ABS(SUM(C10:C11)-C12)<1,"无误","合计有误")'},
+        {"C11": 46_418_122.14, "C12": 106_959_211.58},  # C10 真空着
+    )
+    outcome = evaluate_checks(path, read_template_checks(path))[0]
+    assert outcome.empty_refs == ["C10"]
+    assert outcome.suggestion is not None
+    coord, value = outcome.suggestion
+    assert coord == "C10"
+    assert abs(value - 60_541_089.44) < 0.01
+
+
+def test_template_checks_mark_unsupported_formula_as_unchecked(tmp_path: Path):
+    """认不出的公式必须标「未校验」，绝不能当成通过。"""
+    from app.services.case2_template_checks import (
+        check_review_flags,
+        evaluate_checks,
+        read_template_checks,
+        summarize,
+    )
+
+    path = _template_check_book(
+        tmp_path,
+        {
+            "C50": '=IF(VLOOKUP(C10,A1:B9,2,FALSE)>0,"无误","不支持的写法")',
+            "C51": "=C4",
+        },
+        {"C10": 1.0},
+    )
+    outcomes = evaluate_checks(path, read_template_checks(path))
+    stats = summarize(outcomes)
+    assert stats["passed"] == 0
+    assert stats["unchecked"] == 1
+    assert stats["mirror_cells"] == 1  # =C4 是镜像取值，不计入未校验
+    assert any(f["kind"] == "template_check_unparsed" for f in check_review_flags(outcomes))
+
+
 def test_llm_guard_aborts_whitespace_degeneration_in_streaming():
     """量化模型在 JSON 冒号后无限吐空格时，必须在流式过程中被中止。
 
