@@ -655,6 +655,30 @@ def test_case2_period_mapping_rejects_mixed_entities():
         )
 
 
+def test_case2_period_mapping_unifies_entity_ocr_variants():
+    """同一主体被 OCR 认成几个变体时不能判为「混入多个企业主体」而终止任务。"""
+    columns = [
+        {"sheet_name": "资产负债表", "field_key": "C", "entity_name": "东厦建设开发团有限公司（并）"},
+        {"sheet_name": "资产负债表", "field_key": "D", "entity_name": "东度建设开发集团有限公司"},
+        {"sheet_name": "资产负债表", "field_key": "E", "entity_name": "东厦建设开发集团有限公司"},
+    ]
+
+    _validate_sheet_identity(columns, preferred_entity="东厦建设开发集团有限公司")
+
+    # 统一到出现频次最高的写法，而不是被认错的那个
+    assert {column["entity_name"] for column in columns} == {"东厦建设开发集团有限公司"}
+
+
+def test_case2_period_mapping_still_rejects_real_different_companies():
+    with pytest.raises(RuntimeError, match="多个企业主体"):
+        _validate_sheet_identity(
+            [
+                {"sheet_name": "资产负债表", "entity_name": "山东尊创置业有限公司"},
+                {"sheet_name": "资产负债表", "entity_name": "山东新鸿置业有限公司"},
+            ]
+        )
+
+
 def test_case2_period_mapping_normalizes_entity_abbreviations():
     columns = [
         {"sheet_name": "利润表", "entity_name": "东厦"},

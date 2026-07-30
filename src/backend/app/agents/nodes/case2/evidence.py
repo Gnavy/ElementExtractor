@@ -51,23 +51,45 @@ def _normalize_scope(value: Any) -> str:
     return ""
 
 
-def _canonical_entity_name(values: list[Any]) -> str:
+def _canonical_entity_name(values: list[Any], *, preferred: Any = "") -> str:
+    """把同一主体的多种写法归并成一个代表名；确属不同主体时返回空串。"""
     names = sorted(
         {
             str(value or "").strip()
             for value in values
             if _normalize_text(value)
         },
-        key=lambda value: len(_normalize_text(value)),
-        reverse=True,
+        # 按归一化长度降序，同长按字面排序，避免 set 迭代顺序带来的不确定
+        key=lambda value: (-len(_normalize_text(value)), value),
     )
     if not names:
         return ""
+    # 优先用出现频次最高的写法当代表名，免得代表名是被 OCR 认错的那个。
+    # 注意要拿每个变体去比代表名，不能变体之间两两比——两个各错一个字的
+    # 写法彼此会差两个字，那样同一主体反而会被判成不同主体。
+    text = str(preferred or "").strip()
+    if text and all(_entity_match_kind(text, name) != "none" for name in names):
+        return text
     longest = names[0]
     normalized_longest = _normalize_text(longest)
     if all(_normalize_text(name) in normalized_longest for name in names[1:]):
         return longest
+    if all(_entity_match_kind(longest, name) != "none" for name in names[1:]):
+        return longest
     return ""
+
+
+def _dominant_entity_name(catalog: dict[str, Any]) -> str:
+    counts: dict[str, int] = {}
+    for fact in catalog.get("facts") or []:
+        name = str(fact.get("entity_name") or "").strip()
+        if _normalize_text(name):
+            counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return ""
+    return sorted(
+        counts.items(), key=lambda kv: (-kv[1], -len(_normalize_text(kv[0])), kv[0])
+    )[0][0]
 
 
 def _edit_distance(left: str, right: str) -> int:
@@ -733,6 +755,7 @@ def _enrich_validated_column(
     *,
     sheet_name: str,
     entries: list[dict[str, Any]],
+    preferred_entity: Any = "",
 ) -> dict[str, Any]:
     data = dict(column)
     data["statement_name"] = (
@@ -756,7 +779,7 @@ def _enrich_validated_column(
             if entry.get("entity_name")
         }
     )
-    canonical_entity = _canonical_entity_name(entities)
+    canonical_entity = _canonical_entity_name(entities, preferred=preferred_entity)
     scopes = sorted(
         {
             _normalize_scope(entry.get("statement_scope"))
@@ -854,7 +877,9 @@ def _carryforward_review_flags(catalog: dict[str, Any]) -> list[dict[str, Any]]:
     return flags
 
 
-def _validate_sheet_identity(columns: list[dict[str, Any]]) -> None:
+def _validate_sheet_identity(
+    columns: list[dict[str, Any]], *, preferred_entity: Any = ""
+) -> None:
     by_sheet: dict[str, list[dict[str, Any]]] = {}
     for column in columns:
         by_sheet.setdefault(str(column.get("sheet_name") or ""), []).append(column)
@@ -864,7 +889,9 @@ def _validate_sheet_identity(columns: list[dict[str, Any]]) -> None:
             for column in sheet_columns
             if _normalize_text(column.get("entity_name"))
         }
-        canonical_entity = _canonical_entity_name(list(entity_names))
+        canonical_entity = _canonical_entity_name(
+            list(entity_names), preferred=preferred_entity
+        )
         if canonical_entity:
             for column in sheet_columns:
                 if column.get("entity_name"):
@@ -942,6 +969,7 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
         if entry.get("source_ref")
     }
     period_entries = _all_period_evidence(catalog)
+    dominant_entity = _dominant_entity_name(catalog)
     for column in result.columns:
         data = column.model_dump()
         if not data.get("sheet_name"):
@@ -959,6 +987,7 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
                 data,
                 sheet_name=key[0],
                 entries=period_entries,
+                preferred_entity=dominant_entity,
             )
 
     for key, label in allowed.items():
@@ -980,7 +1009,7 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
     period_map = {"columns": list(by_key.values())}
-    _validate_sheet_identity(period_map["columns"])
+    _validate_sheet_identity(period_map["columns"], preferred_entity=dominant_entity)
     mapped = sum(1 for column in period_map["columns"] if column.get("report_date"))
     if not mapped:
         raise RuntimeError("Case2 未能从材料证据建立任何报告期映射")
