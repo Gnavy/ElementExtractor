@@ -44,7 +44,7 @@ def parse_calc_block(calc_body: str) -> list[dict[str, Any]]:
         if len(parts) < 4:
             continue
         op = parts[0].lower()
-        if op not in ("sum", "sum_if_missing"):
+        if op not in ("sum", "sum_if_missing", "diff"):
             continue
         sheet, target_label, sources_raw = parts[1], parts[2], parts[3]
         source_labels = [s.strip() for s in sources_raw.split(",") if s.strip()]

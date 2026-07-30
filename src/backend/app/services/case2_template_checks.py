@@ -1,13 +1,6 @@
-"""读取模板自带的核查检验公式，据此核对填报结果。
+"""按模板自带的核查检验公式核对填报结果，生成复核提示。
 
-对应业务说明 5.2.1：「模板的说明区、表头和已有公式都属于业务口径的一部分，
-不能忽略」。汇总、勾稽这类关系模板自己已经写清楚了，不需要再手写一遍规则。
-
-设计上刻意不认具体模板：
-- 不硬编码行号、列号、检验条数，读到什么算什么；
-- 只认一小段表达式语法（数字 / 单元格 / SUM / 括号 / 加减乘），
-  认不出来的公式标记为「未校验」放过，不影响其他条，也不报错；
-- 只读不写。核查格本身是公式，按 5.2.4 绝不回写。
+只读不回写；仅解析数字/单元格/SUM/加减乘，认不出的公式标「未校验」。
 """
 
 from __future__ import annotations
@@ -57,6 +50,7 @@ class CheckOutcome:
     empty_refs: list[str] = field(default_factory=list)
     suggestion: tuple[str, float] | None = None  # (单元格, 由其余项反解出的值)
     delta_matches: list[str] = field(default_factory=list)  # 值恰好等于差额的格
+    refs: list[str] = field(default_factory=list)  # 本条公式引用到的全部格
     note: str = ""
 
 
@@ -356,7 +350,7 @@ def _evaluate_one(check: TemplateCheck, values: dict[str, Any]) -> CheckOutcome:
     refs = sorted(set(evaluator.refs))
     empty = [ref for ref in refs if _numeric(values, ref) is None]
     ok = abs(delta) < check.tolerance
-    outcome = CheckOutcome(check, ok, delta=delta, empty_refs=empty)
+    outcome = CheckOutcome(check, ok, delta=delta, empty_refs=empty, refs=refs)
     if not ok:
         if len(empty) == 1:
             outcome.suggestion = _solve_single_unknown(check, numeric, empty[0], delta)

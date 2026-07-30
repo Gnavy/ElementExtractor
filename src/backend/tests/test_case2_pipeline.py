@@ -510,6 +510,63 @@ def test_template_checks_mark_unsupported_formula_as_unchecked(tmp_path: Path):
     assert any(f["kind"] == "template_check_unparsed" for f in check_review_flags(outcomes))
 
 
+def _calc_module():
+    import sys
+    from pathlib import Path as _P
+
+    scripts = str(_P(__file__).resolve().parent.parent / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import apply_case2_calc_rules
+
+    return apply_case2_calc_rules
+
+
+def test_calc_sum_overwrites_model_value_and_flags_it():
+    """sum/diff 以规则为准，覆盖已有值并留痕。"""
+    calc = _calc_module()
+    data = {"sheets": [{"sheet": "资产负债表", "items": [
+        {"item_id": "r9", "label": "应收票据及应收账款",
+         "fields": {"D": {"cell": "D9", "value": 465147735.17}}},
+        {"item_id": "r10", "label": "其中:应收票据",
+         "fields": {"D": {"cell": "D10", "value": 110516.93}}},
+        {"item_id": "r11", "label": "应收账款",
+         "fields": {"D": {"cell": "D11", "value": 354537218.24}}},
+    ]}]}
+    report = calc.apply_calc_rules(data, [{
+        "op": "sum", "sheet": "资产负债表",
+        "target_label": "应收票据及应收账款",
+        "source_labels": ["其中应收票据", "应收账款"],
+    }])
+
+    assert data["sheets"][0]["items"][0]["fields"]["D"]["value"] == 354647735.17
+    assert report["applied"][0]["overwrote"] == 465147735.17
+    assert any(f["kind"] == "calc_overwrote_model_value" for f in report["review_flags"])
+
+
+def test_calc_diff_subtracts_and_requires_all_sources():
+    calc = _calc_module()
+    data = {"sheets": [{"sheet": "资产负债表", "items": [
+        {"item_id": "r119", "label": "归属于母公司所有者权益合计",
+         "fields": {"F": {"cell": "F119", "value": None}, "E": {"cell": "E119", "value": None}}},
+        {"item_id": "r120", "label": "少数股东权益",
+         "fields": {"F": {"cell": "F120", "value": 46418122.14}, "E": {"cell": "E120", "value": None}}},
+        {"item_id": "r121", "label": "所有者权益合计",
+         "fields": {"F": {"cell": "F121", "value": 106959211.58}, "E": {"cell": "E121", "value": 601800680.28}}},
+    ]}]}
+    report = calc.apply_calc_rules(data, [{
+        "op": "diff", "sheet": "资产负债表",
+        "target_label": "归属于母公司所有者权益合计",
+        "source_labels": ["所有者权益合计", "少数股东权益"],
+    }])
+
+    fields = data["sheets"][0]["items"][0]["fields"]
+    assert fields["F"]["value"] == 60541089.44
+    # E 列少数股东权益缺值：差额缺任一来源都不算，不出半截差额
+    assert fields["E"]["value"] is None
+    assert any("missing source value" in str(s.get("reason")) for s in report["skipped"])
+
+
 def test_llm_guard_aborts_whitespace_degeneration_in_streaming():
     """量化模型在 JSON 冒号后无限吐空格时，必须在流式过程中被中止。
 

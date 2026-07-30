@@ -99,35 +99,39 @@ def _apply_rule_to_column(
     source_items: list[dict],
     col_key: str,
     *,
-    only_if_missing: bool,
-) -> tuple[bool, str | None]:
+    op: str,
+) -> tuple[bool, str | None, Any]:
+    """返回 (是否写入, 跳过原因, 被覆盖的旧值)。
+
+    sum / diff 以规则为准，覆盖已有值并留痕；sum_if_missing 仅在缺值时补。
+    """
     target_field = (target_item.get("fields") or {}).get(col_key)
     if not isinstance(target_field, dict):
-        return False, "target field missing"
+        return False, "target field missing", None
 
     current = target_field.get("value")
-    if only_if_missing and not _is_empty(current):
-        return False, "target already filled"
+    if op == "sum_if_missing" and not _is_empty(current):
+        return False, "target already filled", None
 
-    total = Decimal(0)
-    used = 0
+    values: list[Decimal | None] = []
     evidence: list[str] = []
     for src_item in source_items:
         field = (src_item.get("fields") or {}).get(col_key)
-        if not isinstance(field, dict):
-            continue
-        d = _to_decimal(field.get("value"))
-        if d is None:
-            continue
-        total += d
-        used += 1
-        evidence.extend(_collect_evidence(src_item))
+        d = _to_decimal(field.get("value")) if isinstance(field, dict) else None
+        values.append(d)
+        if d is not None:
+            evidence.extend(_collect_evidence(src_item))
 
-    if used == 0:
-        return False, "no source values"
-
-    if not only_if_missing and not _is_empty(current):
-        return False, "target already filled (sum)"
+    if op == "diff":
+        # 差额：第一项减去其余项；任一来源缺值都不算，避免半截差额
+        if any(v is None for v in values) or not values:
+            return False, "missing source value for diff", None
+        total = values[0] - sum(values[1:], Decimal(0))
+    else:
+        present = [v for v in values if v is not None]
+        if not present:
+            return False, "no source values", None
+        total = sum(present, Decimal(0))
 
     # Preserve int-like decimals as float/int for JSON
     if total == total.to_integral_value():
@@ -135,14 +139,16 @@ def _apply_rule_to_column(
     else:
         new_val = float(total)
 
+    overwrote = None
+    if not _is_empty(current) and _to_decimal(current) != total:
+        overwrote = current
     target_field["value"] = new_val
-    op = rule.get("op", "sum")
     src_labels = ", ".join(rule.get("source_labels") or [])
     target_item["reason_one_line"] = f"计算规则({op}): {src_labels}"
     merged_refs = list(dict.fromkeys(_collect_evidence(target_item) + evidence))
     if merged_refs:
         target_item["evidence_refs"] = merged_refs
-    return True, None
+    return True, None, overwrote
 
 
 def apply_calc_rules(data: dict, rules: list[dict[str, Any]]) -> dict[str, Any]:
@@ -210,18 +216,17 @@ def apply_calc_rules(data: dict, rules: list[dict[str, Any]]) -> dict[str, Any]:
             continue
 
         op = rule.get("op", "sum")
-        only_if_missing = op == "sum_if_missing"
         col_keys = {k for k, _ in _value_fields(target_item)}
         for src in source_items:
             col_keys.update(k for k, _ in _value_fields(src))
 
         for col_key in sorted(col_keys):
-            ok, reason = _apply_rule_to_column(
+            ok, reason, overwrote = _apply_rule_to_column(
                 rule,
                 target_item,
                 source_items,
                 col_key,
-                only_if_missing=only_if_missing,
+                op=op,
             )
             cell = ((target_item.get("fields") or {}).get(col_key) or {}).get("cell")
             entry = {
@@ -235,6 +240,20 @@ def apply_calc_rules(data: dict, rules: list[dict[str, Any]]) -> dict[str, Any]:
                 entry["value"] = (
                     (target_item.get("fields") or {}).get(col_key) or {}
                 ).get("value")
+                if overwrote is not None:
+                    entry["overwrote"] = overwrote
+                    report["review_flags"].append(
+                        {
+                            "kind": "calc_overwrote_model_value",
+                            "sheet_name": sheet_name,
+                            "cell": cell,
+                            "detail": (
+                                f"{sheet_name} {cell}「{rule.get('target_label')}」"
+                                f"按计算规则({op})覆盖了模型填的 {overwrote}，"
+                                f"现值 {entry['value']}，请复核以规则口径为准是否正确"
+                            ),
+                        }
+                    )
                 report["applied"].append(entry)
             elif reason and reason != "target already filled":
                 report["skipped"].append({**entry, "reason": reason})

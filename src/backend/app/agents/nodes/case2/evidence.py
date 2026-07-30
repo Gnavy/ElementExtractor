@@ -121,10 +121,8 @@ def _entity_key(value: Any) -> str:
 def _entity_match_kind(left: Any, right: Any) -> str:
     """返回 exact / fuzzy / none。
 
-    fuzzy 只覆盖扫描件 OCR 认错一两个字的情况（东厦→东度），判定条件是
-    名字足够长、长度几乎相同、且只差一个字符。刻意不放宽到「相似即同一」：
-    「XX集团有限公司」与「XX有限公司」常常是母子公司，「甲公司」与「乙公司」
-    也只差一个字，混填违反业务口径。
+    fuzzy 仅认长名字、长度差 ≤1 且编辑距离 ≤1 的 OCR 错字变体；
+    母子公司、短名差一字均判为不同主体。
     """
     left_key = _entity_key(left)
     right_key = _entity_key(right)
@@ -557,9 +555,7 @@ def extract_evidence_chunk_node(state: dict[str, Any]) -> dict[str, Any]:
                 ),
             ),
         ],
-        # 不设输出上限：一页密集的资产负债表证据本来就可能写满几千 token，
-        # 硬上限会把正常输出截断（任务 5c17dcad 即此）。空转由退化探测负责中止；
-        # 非流式时探测器无效，退回一个宽松上限兜底。
+        # 输出不设上限，空转由退化探测中止；非流式时用宽松上限兜底
         config=guard_config(),
         **fallback_max_tokens(_EVIDENCE_FALLBACK_MAX_TOKENS),
     )

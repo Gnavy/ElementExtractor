@@ -47,7 +47,7 @@ def apply_calc_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_template_checks(root: Path) -> tuple[list[dict[str, Any]], str]:
-    """用模板自带的核查检验公式核对产物。只读，不回写公式格。"""
+    """按模板核查检验公式核对产物并生成复核提示。只读，不回写公式格。"""
     filled = root / "outputs" / "collection_filled.xlsx"
     if not filled.is_file():
         return [], ""
@@ -89,7 +89,8 @@ def _run_template_checks(root: Path) -> tuple[list[dict[str, Any]], str]:
         f"模板核查={stats['passed']}/{stats['checks']} 通过"
         f"，未通过 {stats['failed']}，未校验 {stats['unchecked']}"
     )
-    return check_review_flags(outcomes), log
+    flags = check_review_flags(outcomes)
+    return flags, log
 
 
 def backfill_node(state: dict[str, Any]) -> dict[str, Any]:

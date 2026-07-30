@@ -24,13 +24,7 @@ class LLMDegenerationError(RuntimeError):
 class _WhitespaceRunGuard(BaseCallbackHandler):
     """流式输出中连续空白超过阈值就中止本次调用。
 
-    背景：量化 Qwen 在结构化输出下会在 JSON 冒号后持续吐空格，约束解码认为
-    仍然合法、又不能在 JSON 未闭合时结束，于是一直生成。此时连接上一直有数据，
-    `LLM_TIMEOUT_SEC` 这类读超时不会触发，历史上只能人工杀任务
-    （任务 58c4d281 卡了 16 分钟、单连接收了 8MB）。
-
-    注意：必须置 `raise_error = True`，否则 langchain 的 handle_event 会吞掉
-    这里抛的异常，探测器等于没装。
+    须置 raise_error=True，否则 langchain 会吞掉回调中抛出的异常。
     """
 
     raise_error = True
@@ -55,22 +49,14 @@ class _WhitespaceRunGuard(BaseCallbackHandler):
 
 
 def fallback_max_tokens(limit: int) -> dict[str, Any]:
-    """流式关闭时退化探测拿不到 token 回调，退回硬上限兜底。
-
-    探测器依赖 `on_llm_new_token`，非流式调用一次性返回、不触发回调。
-    这种情况下若又不设上限就完全没有保护，所以给一个宽松的上限。
-    """
+    """非流式没有 token 回调、退化探测无效，改用输出上限兜底。"""
     if settings.llm_streaming:
         return {}
     return {"max_tokens": limit}
 
 
 def guard_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """给一次 invoke 挂上退化探测。
-
-    每次调用都要新建 handler：证据抽取是 8 路并发，共用一个实例会把各路的
-    空白游程计数混在一起。
-    """
+    """给一次 invoke 挂上退化探测；每次新建 handler，避免并发共享计数。"""
     data = dict(config or {})
     max_run = int(settings.llm_degeneration_whitespace_run or 0)
     if max_run <= 0:
