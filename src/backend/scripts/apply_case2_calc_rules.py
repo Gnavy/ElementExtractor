@@ -19,11 +19,27 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 
+_LABEL_PUNCT_RE = re.compile(r"[:：、,，.。;；]+")
+# 模板与规则里「其中/加/减」这类前缀写法不统一（其中应收票据 vs 其中:应收票据）
+_LABEL_PREFIX_RE = re.compile(r"^(?:其中|加|减)")
+
+
 def _norm_label(text: str) -> str:
     s = unicodedata.normalize("NFKC", str(text or ""))
     s = re.sub(r"\s+", "", s)
     s = s.replace("（", "(").replace("）", ")")
+    s = _LABEL_PUNCT_RE.sub("", s)
     return s.lower()
+
+
+def _core_label(text: str) -> str:
+    """剥掉「其中/加/减」前缀后的科目主体名，用于最后一档匹配"""
+    s = _norm_label(text)
+    while True:
+        stripped = _LABEL_PREFIX_RE.sub("", s)
+        if stripped == s:
+            return s
+        s = stripped
 
 
 def _is_empty(v: Any) -> bool:
@@ -51,6 +67,11 @@ def _find_item(sheet_data: dict, label: str) -> dict | None:
         lbl = _norm_label(item.get("label") or "")
         if target in lbl or lbl in target:
             return item
+    core = _core_label(label)
+    if core:
+        for item in sheet_data.get("items") or []:
+            if _core_label(item.get("label") or "") == core:
+                return item
     return None
 
 
@@ -125,7 +146,12 @@ def _apply_rule_to_column(
 
 
 def apply_calc_rules(data: dict, rules: list[dict[str, Any]]) -> dict[str, Any]:
-    report: dict[str, Any] = {"applied": [], "skipped": [], "warnings": []}
+    report: dict[str, Any] = {
+        "applied": [],
+        "skipped": [],
+        "warnings": [],
+        "review_flags": [],
+    }
     sheets_by_name = {
         (sh.get("sheet") or sh.get("name") or ""): sh for sh in data.get("sheets") or []
     }
@@ -155,9 +181,28 @@ def apply_calc_rules(data: dict, rules: list[dict[str, Any]]) -> dict[str, Any]:
             else:
                 missing_sources.append(lbl)
         if missing_sources:
+            # 组成项目不全时求和一定是错的，宁可留空让人工处理，不写部分和
             report["warnings"].append(
                 f"{sheet_name}: missing sources {missing_sources} for {rule.get('target_label')}"
             )
+            report["skipped"].append(
+                {
+                    "rule": rule,
+                    "reason": f"missing source items: {missing_sources}",
+                }
+            )
+            report["review_flags"].append(
+                {
+                    "kind": "calc_incomplete_sources",
+                    "sheet_name": sheet_name,
+                    "target": rule.get("target_label"),
+                    "detail": (
+                        f"{sheet_name}「{rule.get('target_label')}」的计算规则缺少组成项目 "
+                        f"{'、'.join(missing_sources)}，未做计算，该行留空需人工确认"
+                    ),
+                }
+            )
+            continue
         if not source_items:
             report["skipped"].append(
                 {"rule": rule, "reason": "no source items resolved"}

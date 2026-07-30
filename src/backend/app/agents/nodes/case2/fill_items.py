@@ -255,6 +255,45 @@ def fill_one_batch_node(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_UNMAPPED_NOTE_MARK = "列报告期未映射成功"
+
+
+def _annotate_unmapped_columns(
+    schema: dict[str, Any], period_mapping: dict[str, Any]
+) -> None:
+    """列没映射上时，空值原因不能写成「文件中未发现相关信息」，要说清是哪一步没走通。"""
+    unmapped: dict[str, list[str]] = {}
+    for column in period_mapping.get("columns") or []:
+        if column.get("report_date"):
+            continue
+        label = str(column.get("field_key") or "")
+        if column.get("column_label"):
+            label = f"{label}（{column.get('column_label')}）"
+        unmapped.setdefault(str(column.get("sheet_name") or ""), []).append(label)
+    if not unmapped:
+        return
+
+    for sheet in schema.get("sheets") or []:
+        columns = unmapped.get(str(sheet.get("sheet") or sheet.get("name") or ""))
+        if not columns:
+            continue
+        note = (
+            "、".join(columns)
+            + f"{_UNMAPPED_NOTE_MARK}，该列未参与填报，非源文件缺失"
+        )
+        for item in sheet.get("items") or []:
+            fields = item.get("fields") or {}
+            if any(
+                isinstance(field, dict) and field.get("value") not in (None, "")
+                for field in fields.values()
+            ):
+                continue
+            reason = str(item.get("reason_one_line") or "").strip()
+            if _UNMAPPED_NOTE_MARK in reason:
+                continue
+            item["reason_one_line"] = (f"{reason}；{note}" if reason else note)[:500]
+
+
 def merge_schema_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     schema = json.loads(
@@ -285,6 +324,8 @@ def merge_schema_node(state: dict[str, Any]) -> dict[str, Any]:
                 item["reason_one_line"] = upd.get("reason_one_line")
             if upd.get("evidence_refs") is not None:
                 item["evidence_refs"] = upd.get("evidence_refs")
+
+    _annotate_unmapped_columns(schema, state.get("period_mapping") or {})
 
     write_json(root / "outputs" / "case2_filled_schema.json", schema)
 

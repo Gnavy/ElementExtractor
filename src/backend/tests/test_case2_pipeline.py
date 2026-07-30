@@ -11,6 +11,8 @@ from pydantic import ValidationError
 from app.agents import llm as llm_module
 from app.agents.llm import structured_llm
 from app.agents.nodes.case2.evidence import (
+    _carryforward_review_flags,
+    _entity_match_kind,
     _missing_ocr_sources,
     _route_evidence_chunks,
     _validate_sheet_identity,
@@ -18,7 +20,10 @@ from app.agents.nodes.case2.evidence import (
     facts_for_fill,
     facts_for_item_ids,
 )
-from app.agents.nodes.case2.fill_items import _normalize_value
+from app.agents.nodes.case2.fill_items import (
+    _annotate_unmapped_columns,
+    _normalize_value,
+)
 from app.agents.schemas.case2_item import (
     Case2BatchFill,
     Case2ChunkEvidence,
@@ -410,6 +415,142 @@ def test_case2_detects_source_without_ocr_text(tmp_path: Path):
     )
 
     assert missing == ["b.docx"]
+
+
+def test_case2_entity_ocr_typo_is_same_subject_but_group_suffix_is_not():
+    """扫描件公司名错一个字要当同一家；「集团」这种成分差异不能当同一家。"""
+    assert _entity_match_kind("东厦建设开发集团有限公司", "东度建设开发集团有限公司") == "fuzzy"
+    assert (
+        _entity_match_kind("东厦建设开发集团有限公司", "东厦建设开发团有限公司（并）")
+        == "fuzzy"
+    )
+    assert _entity_match_kind("东厦建设开发集团有限公司", "东厦建设开发有限公司") == "none"
+    assert _entity_match_kind("山东尊创置业有限公司", "山东新鸿置业有限公司") == "none"
+    # 短名字差一个字不能当同一家
+    assert _entity_match_kind("甲公司", "乙公司") == "none"
+
+
+def test_case2_facts_survive_entity_name_ocr_typo():
+    """同一份材料里公司名被 OCR 认错，不能因此丢掉整页证据。"""
+    catalog = {
+        "source_inventory": [{"source_ref": "ocr_text/a.pdf.md"}],
+        "facts": [
+            {
+                "item_id": "资产负债表:r6",
+                "entity_name": "东度建设开发集团有限公司",
+                "statement_scope": "合并",
+                "statement_name": "资产负债表",
+                "report_date": "2022-12-31",
+                "value": 248573298.6,
+                "source_ref": "ocr_text/a.pdf.md",
+            }
+        ],
+    }
+    period_mapping = {
+        "columns": [
+            {
+                "sheet_name": "资产负债表",
+                "field_key": "D",
+                "entity_name": "东厦建设开发集团有限公司",
+                "statement_scope": "合并",
+                "report_date": "2022-12-31",
+            }
+        ]
+    }
+
+    facts = facts_for_fill(
+        catalog,
+        {"资产负债表:r6"},
+        sheet_name="资产负债表",
+        period_mapping=period_mapping,
+    )
+
+    assert [fact["value"] for fact in facts] == [248573298.6]
+
+
+def test_case2_carryforward_mismatch_is_flagged_without_changing_data():
+    """本期年初数与上期期末数对不上时只报复核提示。"""
+    def fact(report_date: str, period: str, subject: str, value: float) -> dict:
+        return {
+            "statement_name": "资产负债表",
+            "report_date": report_date,
+            "source_period": period,
+            "subject_name": subject,
+            "value": value,
+        }
+
+    subjects = ("货币资金", "应收账款", "资产总计", "流动资产合计")
+    catalog = {
+        "facts": [
+            # 2020 年末
+            *(fact("2020-12-31", "期末数", name, 100.0) for name in subjects),
+            # 2021 页的「年初数」应等于上面这组，但这里整体对不上
+            *(fact("2021-12-31", "年初数", name, 900.0) for name in subjects),
+            # 2022 页的年初数与 2021 期末数一致，不应报
+            *(fact("2021-12-31", "期末数", name, 500.0) for name in subjects),
+            *(fact("2022-12-31", "年初数", name, 500.0) for name in subjects),
+        ]
+    }
+
+    flags = _carryforward_review_flags(catalog)
+
+    assert [flag["report_date"] for flag in flags] == ["2021-12-31"]
+    assert flags[0]["kind"] == "carryforward_mismatch"
+    # 只提示，不改动任何事实
+    assert catalog["facts"][4]["value"] == 900.0
+
+
+def test_case2_unmapped_column_reason_is_not_reported_as_missing_source():
+    schema = {
+        "sheets": [
+            {
+                "sheet": "资产负债表",
+                "items": [
+                    {
+                        "item_id": "资产负债表:r6",
+                        "fields": {
+                            "C": {"cell": "C6", "value": None},
+                            "E": {"cell": "E6", "value": None},
+                        },
+                        "reason_one_line": "文件中未发现相关信息",
+                    },
+                    {
+                        "item_id": "资产负债表:r9",
+                        "fields": {"E": {"cell": "E9", "value": 1.0}},
+                        "reason_one_line": "文件中未发现相关信息",
+                    },
+                ],
+            }
+        ]
+    }
+    period_mapping = {
+        "columns": [
+            {
+                "sheet_name": "资产负债表",
+                "field_key": "C",
+                "column_label": "最近一期报告",
+                "report_date": None,
+            },
+            {
+                "sheet_name": "资产负债表",
+                "field_key": "E",
+                "column_label": "上期(年报)",
+                "report_date": "2021-12-31",
+            },
+        ]
+    }
+
+    _annotate_unmapped_columns(schema, period_mapping)
+    items = schema["sheets"][0]["items"]
+
+    assert "未映射成功" in items[0]["reason_one_line"]
+    assert "非源文件缺失" in items[0]["reason_one_line"]
+    # 有值的行不加注
+    assert items[1]["reason_one_line"] == "文件中未发现相关信息"
+
+    # 重复执行不叠加
+    _annotate_unmapped_columns(schema, period_mapping)
+    assert items[0]["reason_one_line"].count("未映射成功") == 1
 
 
 def test_case2_facts_do_not_mix_entities_or_statement_scopes():

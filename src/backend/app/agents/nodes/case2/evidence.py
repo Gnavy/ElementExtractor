@@ -10,6 +10,7 @@ from app.agents.llm import structured_llm
 from app.agents.prompts import case2 as prompts
 from app.agents.schemas.case2_item import Case2ChunkEvidence, Case2PeriodMap
 from app.agents.tools.context import write_json
+from app.services.case2_review import add_review_flags
 
 
 _CHUNK_CHARS = 7000
@@ -29,6 +30,10 @@ _FINANCIAL_HEADER_RE = re.compile(
     r"本年累计金额|本月金额|本期金额|上期金额)"
 )
 _STATEMENT_NAMES = ("资产负债表", "利润表", "现金流量表")
+# 短名字差一个字往往是两家公司（甲公司/乙公司），只在长名字上认 OCR 错字
+_ENTITY_FUZZY_MIN_LEN = 6
+_OPENING_PERIOD_RE = re.compile(r"(年初|期初|上年年末|上年期末)")
+_CLOSING_PERIOD_RE = re.compile(r"(期末|年末)")
 
 
 def _normalize_text(value: Any) -> str:
@@ -65,12 +70,76 @@ def _canonical_entity_name(values: list[Any]) -> str:
     return ""
 
 
+def _edit_distance(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    previous = list(range(len(right) + 1))
+    for i, lc in enumerate(left, start=1):
+        current = [i]
+        for j, rc in enumerate(right, start=1):
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (lc != rc),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _entity_key(value: Any) -> str:
+    """比对用的主体名：去掉标点和「（并）」这类口径批注，只留名字本身"""
+    text = re.sub(r"[(（][^)）]{0,6}[)）]", "", str(value or ""))
+    return _normalize_text(text)
+
+
+def _entity_match_kind(left: Any, right: Any) -> str:
+    """返回 exact / fuzzy / none。
+
+    fuzzy 只覆盖扫描件 OCR 认错一两个字的情况（东厦→东度），判定条件是
+    名字足够长、长度几乎相同、且只差一个字符。刻意不放宽到「相似即同一」：
+    「XX集团有限公司」与「XX有限公司」常常是母子公司，「甲公司」与「乙公司」
+    也只差一个字，混填违反业务口径。
+    """
+    left_key = _entity_key(left)
+    right_key = _entity_key(right)
+    if not left_key or not right_key:
+        return "exact"
+    if left_key in right_key or right_key in left_key:
+        return "exact"
+    if (
+        min(len(left_key), len(right_key)) >= _ENTITY_FUZZY_MIN_LEN
+        and abs(len(left_key) - len(right_key)) <= 1
+        and _edit_distance(left_key, right_key) <= 1
+    ):
+        return "fuzzy"
+    return "none"
+
+
 def _entity_names_compatible(left: Any, right: Any) -> bool:
-    left_text = _normalize_text(left)
-    right_text = _normalize_text(right)
-    if not left_text or not right_text:
-        return True
-    return left_text in right_text or right_text in left_text
+    return _entity_match_kind(left, right) != "none"
+
+
+def _fuzzy_entity_pairs(catalog: dict[str, Any]) -> list[tuple[str, str]]:
+    """列出被判为「同一主体的 OCR 变体」的名字对，供人工复核"""
+    names = _entity_variants(catalog)
+    pairs: list[tuple[str, str]] = []
+    for index, left in enumerate(names):
+        for right in names[index + 1 :]:
+            if _entity_match_kind(left, right) == "fuzzy":
+                pairs.append((left, right))
+    return pairs
+
+
+def _entity_variants(catalog: dict[str, Any]) -> list[str]:
+    return sorted(
+        {
+            str(entry.get("entity_name") or "").strip()
+            for entry in catalog.get("facts") or []
+            if _normalize_text(entry.get("entity_name"))
+        }
+    )
 
 
 def _normalize_statement(value: Any) -> str:
@@ -631,7 +700,9 @@ def _matching_period_evidence(
     if report_date is None:
         return []
     expected_statement = _normalize_statement(column.get("statement_name"))
-    expected_entity = _normalize_text(column.get("entity_name"))
+    # 比对交给 _entity_names_compatible，这里保留原始写法，别提前把括号批注抹掉
+    expected_entity_raw = str(column.get("entity_name") or "")
+    expected_entity = _normalize_text(expected_entity_raw)
     expected_scope = _normalize_scope(column.get("statement_scope"))
     expected_ref = str(column.get("source_ref") or "")
 
@@ -644,7 +715,7 @@ def _matching_period_evidence(
             continue
         entity = _normalize_text(entry.get("entity_name"))
         if expected_entity and entity and not _entity_names_compatible(
-            expected_entity, entity
+            expected_entity_raw, entry.get("entity_name")
         ):
             continue
         scope = _normalize_scope(entry.get("statement_scope"))
@@ -702,6 +773,85 @@ def _enrich_validated_column(
     if not data.get("evidence_text"):
         data["evidence_text"] = str(matched[0].get("evidence_text") or "")[:400]
     return data
+
+
+def _fact_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").replace(",", "").replace("，", "").strip()
+    if not text:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    text = text.strip("()")
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return -number if negative else number
+
+
+def _carryforward_review_flags(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """时点表勾稽体检：本期年初数应等于上期期末数。只提示，不改数。"""
+    buckets: dict[tuple[date, str], dict[str, float]] = {}
+    for fact in catalog.get("facts") or []:
+        if _normalize_statement(fact.get("statement_name")) != "资产负债表":
+            continue
+        report_date = _parse_date(fact.get("report_date"))
+        if report_date is None:
+            continue
+        period_text = str(fact.get("source_period") or "")
+        if _OPENING_PERIOD_RE.search(period_text):
+            kind = "opening"
+        elif _CLOSING_PERIOD_RE.search(period_text):
+            kind = "closing"
+        else:
+            continue
+        number = _fact_number(fact.get("value"))
+        subject = _normalize_text(fact.get("subject_name"))
+        if number is None or not subject:
+            continue
+        buckets.setdefault((report_date, kind), {}).setdefault(subject, number)
+
+    flags: list[dict[str, Any]] = []
+    for (report_date, kind), opening in sorted(buckets.items(), key=lambda x: str(x[0])):
+        if kind != "opening":
+            continue
+        try:
+            previous = date(report_date.year - 1, 12, 31)
+        except ValueError:
+            continue
+        closing = buckets.get((previous, "closing"))
+        if not closing:
+            continue
+        common = sorted(set(opening) & set(closing))
+        if len(common) < 3:
+            continue
+        mismatch = [
+            subject
+            for subject in common
+            if abs(opening[subject] - closing[subject])
+            > max(1.0, abs(closing[subject]) * 0.005)
+        ]
+        if len(mismatch) * 2 <= len(common):
+            continue
+        flags.append(
+            {
+                "kind": "carryforward_mismatch",
+                "statement": "资产负债表",
+                "report_date": report_date.isoformat(),
+                "compared_with": previous.isoformat(),
+                "matched_subjects": len(common),
+                "mismatched_subjects": len(mismatch),
+                "detail": (
+                    f"{report_date.isoformat()} 的年初数与 {previous.isoformat()} 的期末数"
+                    f"有 {len(mismatch)}/{len(common)} 个科目对不上，"
+                    "该页期末/年初两列可能被识别颠倒，请人工复核后再采用该期数据"
+                ),
+            }
+        )
+    return flags
 
 
 def _validate_sheet_identity(columns: list[dict[str, Any]]) -> None:
@@ -834,10 +984,44 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
     mapped = sum(1 for column in period_map["columns"] if column.get("report_date"))
     if not mapped:
         raise RuntimeError("Case2 未能从材料证据建立任何报告期映射")
+
+    review_flags: list[dict[str, Any]] = []
+    for column in period_map["columns"]:
+        if column.get("report_date"):
+            continue
+        review_flags.append(
+            {
+                "kind": "period_unmapped",
+                "sheet_name": column.get("sheet_name"),
+                "field_key": column.get("field_key"),
+                "column_label": column.get("column_label"),
+                "detail": (
+                    f"{column.get('field_key')} 列（{column.get('column_label')}）"
+                    "未能在证据中确定报告期，该列不会参与填报；"
+                    "留空原因是期次未映射，不代表源文件中没有这期数据"
+                ),
+            }
+        )
+    variants = _entity_variants(catalog)
+    if len(variants) > 1:
+        merged = _fuzzy_entity_pairs(catalog)
+        detail = "证据中出现多个公司名称写法：" + "、".join(variants)
+        if merged:
+            detail += "；其中 " + "、".join(
+                f"「{left}」与「{right}」" for left, right in merged
+            ) + " 已按同一主体的 OCR 变体处理，请确认确为同一家公司"
+        review_flags.append({"kind": "entity_variants", "detail": detail})
+    review_flags.extend(_carryforward_review_flags(catalog))
+    period_map["review_flags"] = review_flags
+    add_review_flags(root, review_flags, stage="map_periods")
+
     write_json(root / "outputs" / "case2_period_map.json", period_map)
+    log_lines = [f"全局期次映射完成：{mapped}/{len(period_map['columns'])} 列"]
+    if review_flags:
+        log_lines.append(f"期次阶段复核提示={len(review_flags)} 条")
     return {
         "period_mapping": period_map,
-        "log_lines": [f"全局期次映射完成：{mapped}/{len(period_map['columns'])} 列"],
+        "log_lines": log_lines,
         "progress": "已建立全局报告期映射",
     }
 

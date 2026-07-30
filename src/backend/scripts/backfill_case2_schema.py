@@ -188,6 +188,7 @@ def main() -> None:
     target_cells = 0
     empty_cells = 0
     skipped = 0
+    cleared_cells: list[str] = []
     warnings: list[str] = list(warnings_pre)
     use_plan = any((sh.get("items") or []) for sh in data.get("sheets") or [])
 
@@ -203,6 +204,17 @@ def main() -> None:
         value = _coerce_value(value, value_type)
         if value is None:
             empty_cells += 1
+            # 没填上的目标格若还留着模板提示文字（如「最近一期报告时间」），
+            # 会被误读成已填内容，这里清掉；数字和公式一律不动
+            cell = ws[coord]
+            if (
+                not isinstance(cell, MergedCell)
+                and isinstance(cell.value, str)
+                and cell.value.strip()
+                and not cell.value.startswith("=")
+            ):
+                cell.value = None
+                cleared_cells.append(f"{ws.title}!{coord}")
             return
         c = ws[coord]
         if isinstance(c, MergedCell):
@@ -286,6 +298,19 @@ def main() -> None:
         wb.save(out)
         wb.close()
 
+    review_flags: list[dict[str, Any]] = []
+    if cleared_cells:
+        review_flags.append(
+            {
+                "kind": "template_placeholder_cleared",
+                "detail": (
+                    f"{len(cleared_cells)} 个未填单元格原本留有模板提示文字，已清空："
+                    + "、".join(cleared_cells[:12])
+                    + ("…" if len(cleared_cells) > 12 else "")
+                ),
+            }
+        )
+
     rep = {
         "ok": True,
         "format": "fill_plan" if use_plan else "legacy",
@@ -293,6 +318,8 @@ def main() -> None:
         "written_cells": written,
         "empty_cells": empty_cells,
         "skipped_cells": skipped,
+        "cleared_placeholder_cells": len(cleared_cells),
+        "review_flags": review_flags,
         "ocr_sidecar_count": sidecar_count,
         "ocr_confidence_threshold": ocr_threshold,
         "ocr_low_confidence_cells": ocr_low_confidence_cells,
