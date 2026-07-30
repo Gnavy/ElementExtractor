@@ -16,6 +16,19 @@ def _coerce_object_list(value):
     return [parsed] if isinstance(parsed, dict) else parsed
 
 
+def _coerce_scope(value):
+    """空串等未提供的写法归一为「未知」，无法映射的列不应使整份结果解析失败。"""
+    if value is None:
+        return "未知"
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none", "n/a", "na", "未提供", "无"}:
+        return "未知"
+    for name in ("合并", "母公司", "单体"):
+        if name in text:
+            return name
+    return "未知"
+
+
 def _coerce_period_hint_list(value):
     parsed = _coerce_object_list(value)
     if not isinstance(parsed, list):
@@ -108,6 +121,8 @@ class Case2ChunkFact(BaseModel):
     evidence_text: str
     confidence: Literal["high", "medium", "low"] = "medium"
 
+    _norm_scope = field_validator("statement_scope", mode="before")(_coerce_scope)
+
 
 class Case2PeriodHint(BaseModel):
     """单个分块内识别出的报表名称、日期和列标题线索。"""
@@ -120,6 +135,8 @@ class Case2PeriodHint(BaseModel):
     report_date: Optional[str] = None
     source_period: Optional[str] = None
     evidence_text: str = ""
+
+    _norm_scope = field_validator("statement_scope", mode="before")(_coerce_scope)
 
 
 class Case2ChunkEvidence(BaseModel):
@@ -160,6 +177,13 @@ class Case2ColumnPeriod(BaseModel):
         validation_alias=AliasChoices("evidence_text", "evidence"),
     )
     source_ref: Optional[str] = None
+
+    _norm_scope = field_validator("statement_scope", mode="before")(_coerce_scope)
+
+    @field_validator("report_date", "entity_name", "source_ref", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        return None if isinstance(v, str) and not v.strip() else v
 
 
 class Case2PeriodMap(BaseModel):

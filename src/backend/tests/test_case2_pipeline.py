@@ -510,6 +510,58 @@ def test_template_checks_mark_unsupported_formula_as_unchecked(tmp_path: Path):
     assert any(f["kind"] == "template_check_unparsed" for f in check_review_flags(outcomes))
 
 
+def test_case2_period_map_accepts_unmappable_column_with_blank_fields():
+    """材料缺某一期时模型会把该列各字段留空，不能让整份映射解析失败。"""
+    period_map = Case2PeriodMap.model_validate(
+        {
+            "columns": [
+                {
+                    "sheet_name": "利润表",
+                    "field_key": "C",
+                    "statement_scope": "合并",
+                    "report_date": "2023-12-31",
+                },
+                {
+                    "sheet_name": "利润表",
+                    "field_key": "F",
+                    "statement_scope": "",
+                    "report_date": "",
+                    "entity_name": "",
+                    "source_ref": "",
+                    "confidence": "low",
+                    "evidence_text": "材料中无 2020 年完整年报，无法映射",
+                },
+            ]
+        }
+    )
+
+    unmapped = period_map.columns[1]
+    assert unmapped.statement_scope == "未知"
+    assert unmapped.report_date is None
+    assert unmapped.entity_name is None
+
+
+def test_upload_zip_md5_stable_for_same_sources(tmp_path: Path):
+    """相同源文件须打出相同 MD5，历史任务的 OCR 结果才能被复用。"""
+    import hashlib
+
+    from app.services.upload_zip_builder import build_zip_from_pairs
+
+    pairs = [("b.pdf", b"world" * 100), ("a.pdf", b"hello" * 100)]
+
+    def md5_of(name: str, extras) -> str:
+        dest = tmp_path / name
+        build_zip_from_pairs(dest, extras=extras, extras_prefix="sources")
+        return hashlib.md5(dest.read_bytes()).hexdigest()
+
+    first = md5_of("one.zip", pairs)
+    assert first == md5_of("two.zip", pairs)
+    assert first == md5_of("three.zip", list(reversed(pairs)))
+    assert first != md5_of(
+        "four.zip", [("b.pdf", b"world" * 100), ("a.pdf", b"HELLO" * 100)]
+    )
+
+
 def _calc_module():
     import sys
     from pathlib import Path as _P
