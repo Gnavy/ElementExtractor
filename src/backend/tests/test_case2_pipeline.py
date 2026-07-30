@@ -417,6 +417,60 @@ def test_case2_detects_source_without_ocr_text(tmp_path: Path):
     assert missing == ["b.docx"]
 
 
+def test_llm_guard_aborts_whitespace_degeneration_in_streaming():
+    """量化模型在 JSON 冒号后无限吐空格时，必须在流式过程中被中止。
+
+    这里走真实的 langchain 流式管道，因为 handler 抛的异常默认会被
+    handle_event 吞掉，只有 raise_error=True 才会向上传播。
+    """
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from app.agents.llm import LLMDegenerationError, guard_config
+
+    degenerate = '{"confidence":' + " " * 3000 + "1}"
+    model = GenericFakeChatModel(messages=iter([AIMessage(content=degenerate)]))
+    with pytest.raises(LLMDegenerationError):
+        for _ in model.stream("hi", config=guard_config()):
+            pass
+
+
+def test_llm_guard_does_not_trip_on_normal_indented_json():
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from app.agents.llm import guard_config
+
+    pretty = json.dumps(
+        {"facts": [{"item_id": f"r{i}", "value": i} for i in range(40)]},
+        ensure_ascii=False,
+        indent=4,
+    )
+    model = GenericFakeChatModel(messages=iter([AIMessage(content=pretty)]))
+    chunks = list(model.stream("hi", config=guard_config()))
+    assert chunks
+
+
+def test_llm_guard_uses_fresh_handler_per_call():
+    """证据抽取是 8 路并发，共用 handler 会把各路的空白游程算到一起。"""
+    from app.agents.llm import guard_config
+
+    first = guard_config()["callbacks"][0]
+    second = guard_config()["callbacks"][0]
+    assert first is not second
+
+
+def test_llm_fallback_cap_only_when_streaming_off(monkeypatch):
+    """非流式时探测器拿不到 token 回调，必须退回硬上限，不能毫无保护。"""
+    from app.agents import llm as llm_module
+
+    monkeypatch.setattr(llm_module.settings, "llm_streaming", True, raising=False)
+    assert llm_module.fallback_max_tokens(16384) == {}
+
+    monkeypatch.setattr(llm_module.settings, "llm_streaming", False, raising=False)
+    assert llm_module.fallback_max_tokens(16384) == {"max_tokens": 16384}
+
+
 def test_case2_entity_ocr_typo_is_same_subject_but_group_suffix_is_not():
     """扫描件公司名错一个字要当同一家；「集团」这种成分差异不能当同一家。"""
     assert _entity_match_kind("东厦建设开发集团有限公司", "东度建设开发集团有限公司") == "fuzzy"

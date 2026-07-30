@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from app.agents.llm import structured_llm
+from app.agents.llm import fallback_max_tokens, guard_config, structured_llm
 from app.agents.prompts import case2 as prompts
 from app.agents.schemas.case2_item import Case2ChunkEvidence, Case2PeriodMap
 from app.agents.tools.context import write_json
@@ -15,7 +15,9 @@ from app.services.case2_review import add_review_flags
 
 _CHUNK_CHARS = 7000
 _CHUNK_OVERLAP = 800
-_EVIDENCE_MAX_TOKENS = 8192
+# 证据抽取默认不设输出上限，由 llm.guard_config() 的退化探测兜底；
+# 仅在非流式（探测器失效）时用下面这个宽松上限保底
+_EVIDENCE_FALLBACK_MAX_TOKENS = 16384
 _PERIOD_MAP_MAX_TOKENS = 4096
 _NULL_TEXT = {"", "null", "none", "nil", "n/a", "na", "未披露", "未找到"}
 _DATE_RE = re.compile(r"(?P<year>20\d{2})[-/.年](?P<month>\d{1,2})[-/.月](?P<day>\d{1,2})日?")
@@ -555,7 +557,11 @@ def extract_evidence_chunk_node(state: dict[str, Any]) -> dict[str, Any]:
                 ),
             ),
         ],
-        max_tokens=_EVIDENCE_MAX_TOKENS,
+        # 不设输出上限：一页密集的资产负债表证据本来就可能写满几千 token，
+        # 硬上限会把正常输出截断（任务 5c17dcad 即此）。空转由退化探测负责中止；
+        # 非流式时探测器无效，退回一个宽松上限兜底。
+        config=guard_config(),
+        **fallback_max_tokens(_EVIDENCE_FALLBACK_MAX_TOKENS),
     )
 
     period_defaults: dict[str, Any] = {}
@@ -959,6 +965,7 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
             ),
         ],
         max_tokens=_PERIOD_MAP_MAX_TOKENS,
+        config=guard_config(),
     )
 
     by_key: dict[tuple[str, str], dict[str, Any]] = {}

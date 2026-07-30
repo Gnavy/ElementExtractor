@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
@@ -14,6 +15,70 @@ _JSON_HINT = (
     "You must respond with valid JSON only. "
     "Output a single JSON object matching the required schema."
 )
+
+
+class LLMDegenerationError(RuntimeError):
+    """模型陷入空转（持续输出空白），已中止本次调用。"""
+
+
+class _WhitespaceRunGuard(BaseCallbackHandler):
+    """流式输出中连续空白超过阈值就中止本次调用。
+
+    背景：量化 Qwen 在结构化输出下会在 JSON 冒号后持续吐空格，约束解码认为
+    仍然合法、又不能在 JSON 未闭合时结束，于是一直生成。此时连接上一直有数据，
+    `LLM_TIMEOUT_SEC` 这类读超时不会触发，历史上只能人工杀任务
+    （任务 58c4d281 卡了 16 分钟、单连接收了 8MB）。
+
+    注意：必须置 `raise_error = True`，否则 langchain 的 handle_event 会吞掉
+    这里抛的异常，探测器等于没装。
+    """
+
+    raise_error = True
+
+    def __init__(self, max_run: int) -> None:
+        self.max_run = max_run
+        self.run = 0
+        self.total = 0
+
+    def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+        for char in token or "":
+            self.total += 1
+            if char.isspace():
+                self.run += 1
+                if self.run > self.max_run:
+                    raise LLMDegenerationError(
+                        f"模型疑似空转：连续输出 {self.run} 个空白字符"
+                        f"（累计 {self.total} 字符），已中止本次调用"
+                    )
+            else:
+                self.run = 0
+
+
+def fallback_max_tokens(limit: int) -> dict[str, Any]:
+    """流式关闭时退化探测拿不到 token 回调，退回硬上限兜底。
+
+    探测器依赖 `on_llm_new_token`，非流式调用一次性返回、不触发回调。
+    这种情况下若又不设上限就完全没有保护，所以给一个宽松的上限。
+    """
+    if settings.llm_streaming:
+        return {}
+    return {"max_tokens": limit}
+
+
+def guard_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """给一次 invoke 挂上退化探测。
+
+    每次调用都要新建 handler：证据抽取是 8 路并发，共用一个实例会把各路的
+    空白游程计数混在一起。
+    """
+    data = dict(config or {})
+    max_run = int(settings.llm_degeneration_whitespace_run or 0)
+    if max_run <= 0:
+        return data
+    callbacks = list(data.get("callbacks") or [])
+    callbacks.append(_WhitespaceRunGuard(max_run))
+    data["callbacks"] = callbacks
+    return data
 
 
 def _provider_name() -> str:

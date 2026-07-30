@@ -95,6 +95,13 @@ class Settings(BaseSettings):
         description="是否启用 Qwen thinking（LLM_ENABLE_THINKING）。"
         "仅用于 OpenAI/vLLM 兼容接口；留空不传参、保持模型服务默认行为",
     )
+    llm_degeneration_whitespace_run: int = Field(
+        default=200,
+        description="退化探测：流式输出中连续空白字符超过该值即判为模型空转并中止本次调用"
+        "（LLM_DEGENERATION_WHITESPACE_RUN）。0=关闭。"
+        "某些量化模型在结构化输出下会在 JSON 冒号后无限吐空格，"
+        "此时数据仍在流动，LLM_TIMEOUT_SEC 这种读超时拦不住，只能靠内容判断",
+    )
     anthropic_api_key: Optional[str] = Field(
         default=None,
         description="Anthropic API Key（ANTHROPIC_API_KEY）",

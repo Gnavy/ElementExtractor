@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.agents.llm import structured_llm
+from app.agents.llm import guard_config, structured_llm
 from app.agents.nodes.case2.evidence import facts_for_fill
 from app.agents.prompts import case2 as prompts
 from app.agents.schemas.case2_item import Case2BatchFill
@@ -167,6 +167,7 @@ def fill_one_batch_node(state: dict[str, Any]) -> dict[str, Any]:
             ),
         ],
         max_tokens=_FILL_BATCH_MAX_TOKENS,
+        config=guard_config(),
     )
 
     result_by_id = {item.item_id: item for item in result.items}
