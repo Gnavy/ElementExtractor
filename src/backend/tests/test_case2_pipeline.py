@@ -544,6 +544,34 @@ def test_calc_sum_overwrites_model_value_and_flags_it():
     assert any(f["kind"] == "calc_overwrote_model_value" for f in report["review_flags"])
 
 
+def test_calc_sum_partial_sources_fill_empty_but_never_overwrite():
+    """来源缺值时部分和只能补空格，不得覆盖模型已填的完整值。"""
+    calc = _calc_module()
+    data = {"sheets": [{"sheet": "资产负债表", "items": [
+        {"item_id": "r64", "label": "应付票据及应付账款",
+         "fields": {"D": {"cell": "D64", "value": 425997938.46},
+                    "C": {"cell": "C64", "value": None}}},
+        {"item_id": "r65", "label": "其中:应付票据",
+         "fields": {"D": {"cell": "D65", "value": None},
+                    "C": {"cell": "C65", "value": None}}},
+        {"item_id": "r66", "label": "应付账款",
+         "fields": {"D": {"cell": "D66", "value": 325897828.35},
+                    "C": {"cell": "C66", "value": 342192538.05}}},
+    ]}]}
+    report = calc.apply_calc_rules(data, [{
+        "op": "sum", "sheet": "资产负债表",
+        "target_label": "应付票据及应付账款",
+        "source_labels": ["其中应付票据", "应付账款"],
+    }])
+
+    fields = data["sheets"][0]["items"][0]["fields"]
+    # D 已有值且来源不全：保留模型值
+    assert fields["D"]["value"] == 425997938.46
+    assert any("incomplete sources" in str(s.get("reason")) for s in report["skipped"])
+    # C 为空：部分和可以补
+    assert fields["C"]["value"] == 342192538.05
+
+
 def test_calc_diff_subtracts_and_requires_all_sources():
     calc = _calc_module()
     data = {"sheets": [{"sheet": "资产负债表", "items": [

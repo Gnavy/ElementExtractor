@@ -131,6 +131,9 @@ def _apply_rule_to_column(
         present = [v for v in values if v is not None]
         if not present:
             return False, "no source values", None
+        # 来源不全时的部分和只能补空，不覆盖已有值
+        if len(present) < len(values) and not _is_empty(current):
+            return False, "incomplete sources, kept existing value", None
         total = sum(present, Decimal(0))
 
     # Preserve int-like decimals as float/int for JSON
