@@ -20,15 +20,25 @@ def split_rules_text(text: str) -> tuple[str, str]:
     if not raw:
         return "", ""
 
-    start = _CALC_START.search(raw)
-    if not start:
-        return raw, ""
-
-    narrative = raw[: start.start()].strip()
-    rest = raw[start.end() :]
-    end = _CALC_END.search(rest)
-    calc_body = rest[: end.start()].strip() if end else rest.strip()
-    return narrative, calc_body
+    # 追加预置会产生多个 CALC 块，全部收集
+    narrative_parts: list[str] = []
+    calc_parts: list[str] = []
+    rest = raw
+    while True:
+        start = _CALC_START.search(rest)
+        if not start:
+            narrative_parts.append(rest.strip())
+            break
+        narrative_parts.append(rest[: start.start()].strip())
+        rest = rest[start.end() :]
+        end = _CALC_END.search(rest)
+        if not end:
+            calc_parts.append(rest.strip())
+            break
+        calc_parts.append(rest[: end.start()].strip())
+        rest = rest[end.end() :]
+    narrative = "\n\n".join(p for p in narrative_parts if p)
+    return narrative, "\n".join(p for p in calc_parts if p)
 
 
 def parse_calc_block(calc_body: str) -> list[dict[str, Any]]:
