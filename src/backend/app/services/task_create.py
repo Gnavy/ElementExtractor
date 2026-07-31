@@ -17,14 +17,17 @@ from app.services.case1_defaults import (
     CASE1_COLLECTION_TEMPLATE_DISPLAY_NAME,
     case1_extract_schema_json,
 )
-from app.services.case2_defaults import CASE2_CLASSIFICATION_BASIS, case2_extract_schema_json
+from app.services.case2_defaults import (
+    CASE2_CLASSIFICATION_BASIS,
+    MAX_FILL_LOGIC_RULES_LEN,
+    case2_extract_schema_json,
+)
 from app.services.paths import ensure_storage, task_upload_collection_storage, task_upload_zip
 from app.services.unzip_service import repair_zip_name
 from app.services.upload_zip_builder import build_zip_from_pairs, zip_entry
 from app.worker_tasks import process_review_task
 
 MAX_INDICATOR_JUDGMENT_RULES_LEN = 8000
-MAX_FILL_LOGIC_RULES_LEN = 8000
 
 _COLLECTION_EXT = frozenset({".xlsx", ".xlsm"})
 

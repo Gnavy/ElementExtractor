@@ -48,10 +48,15 @@ class _WhitespaceRunGuard(BaseCallbackHandler):
                 self.run = 0
 
 
-def fallback_max_tokens(limit: int) -> dict[str, Any]:
-    """非流式没有 token 回调、退化探测无效，改用输出上限兜底。"""
-    if settings.llm_streaming:
-        return {}
+def output_cap(limit: int) -> dict[str, Any]:
+    """给一次调用设输出上限。流式也要设——这是唯一确定性的终止条件。
+
+    2026-07-31 实测：证据抽取挂死 18 分钟，三道防线同时失效。读超时测的是相邻
+    字节的间隔（正常响应实测最大 0.41 秒，模型只要还在吐就够不着）；空白探测器
+    只数连续空白，退化成重复输出非空白内容时不触发（历史上出现过单连接 8MB）；
+    而当时流式分支直接返回 {}，等于没有上限。撞上限会抛错让任务快速失败，
+    比无限挂着好。
+    """
     return {"max_tokens": limit}
 
 

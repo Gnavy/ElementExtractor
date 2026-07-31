@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.agents.llm import structured_llm
+from app.agents.llm import guard_config, output_cap, structured_llm
 from app.agents.prompts import case1 as prompts
 from app.agents.schemas.case1_row import RegionResolve
 from app.agents.tools.context import collect_ocr_snippets
@@ -17,11 +17,14 @@ def resolve_region_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     context = collect_ocr_snippets(root, max_files=8, max_total_chars=10000)
     llm = structured_llm(RegionResolve)
+    # 只返回城市/区县/依据，2048 足够
     result: RegionResolve = llm.invoke(
         [
             ("system", prompts.REGION_SYSTEM),
             ("human", prompts.REGION_USER.format(context=context)),
-        ]
+        ],
+        config=guard_config(),
+        **output_cap(2048),
     )
     region = " ".join(x for x in [result.city, result.district] if x).strip()
     return {

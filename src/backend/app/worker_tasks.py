@@ -30,7 +30,7 @@ from app.services.case2_schema_pipeline import (
     has_case2_filled_schema,
     validate_case2_backfill,
 )
-from app.services.ocr_runner import run_ocr
+from app.services.ocr_runner import ocr_guards_enabled, run_ocr
 from app.services.paths import (
     copy_collection_template_into_extract,
     ensure_storage,
@@ -261,10 +261,15 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
 
         if task.zip_md5:
 
+            guards_on = ocr_guards_enabled(task.task_kind or "")
             reuse_src, ocr_from_cache = find_reusable_extract(
-
-                db, task.zip_md5, task_id
-
+                db,
+                task.zip_md5,
+                task_id,
+                expected_ocr={
+                    "text_layer_guard": guards_on and settings.ocr_text_layer_guard,
+                    "table_split": guards_on and settings.ocr_table_split,
+                },
             )
 
 
@@ -406,7 +411,11 @@ def process_review_task(task_id: str, resume: bool = False) -> dict:
 
                 db.commit()
 
-                code, ocr_log = run_ocr(extract_root, log_path=outputs_dir / "ocr.log")
+                code, ocr_log = run_ocr(
+                    extract_root,
+                    log_path=outputs_dir / "ocr.log",
+                    task_kind=task.task_kind or "",
+                )
 
                 if code != 0:
 

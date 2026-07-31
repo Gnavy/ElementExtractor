@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,41 @@ def _set_cell(ws, row: int, col: int, value) -> bool:
     return True
 
 
+def _exclusive_option_texts(root: Path) -> dict[tuple[str, int], str]:
+    """互斥组每一行的选项原文，按 (sheet, row) 索引。
+
+    D 列一律由程序按行号取原文写入，模型只负责指出选中哪一行。
+    让模型复述选项全文会触发失控生成——2026-07-30 任务 19226215 的
+    「周边配套分析」（选项 1 有 200+ 字带换行）连续两轮生成到 19.8 万字符
+    仍未闭合 JSON。顺带也消除了「选项文本与 C 列不完全一致」这类校验失败。
+    """
+    catalog_path = root / "outputs" / "template_row_catalog.json"
+    try:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    texts: dict[tuple[str, int], str] = {}
+
+    def walk(node, sheet: str = "") -> None:
+        if isinstance(node, dict):
+            sheet = str(node.get("name") or sheet)
+            if node.get("choice_mode") == "exclusive":
+                for row in node.get("rows") or []:
+                    number = row.get("row")
+                    option = row.get("option_text")
+                    if isinstance(number, int) and option:
+                        texts[(sheet, number)] = str(option)
+            for value in node.values():
+                walk(value, sheet)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, sheet)
+
+    walk(catalog)
+    return texts
+
+
 def write_xlsx_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     template = root / "inputs" / "collection_template.xlsx"
@@ -40,6 +76,7 @@ def write_xlsx_node(state: dict[str, Any]) -> dict[str, Any]:
         return {"errors": ["缺少 inputs/collection_template.xlsx"], "log_lines": ["write_xlsx 失败"]}
 
     shutil.copy2(template, out)
+    option_texts = _exclusive_option_texts(root)
     fills = state.get("row_fills") or []
     # Prefer last fill for each (sheet, row) if duplicates from retries
     by_key: dict[tuple[str, int], dict] = {}
@@ -65,7 +102,9 @@ def write_xlsx_node(state: dict[str, Any]) -> dict[str, Any]:
         choice = f.get("choice")
         remark = f.get("remark") or ""
         if choice not in (None, ""):
-            if _set_cell(ws, row, 4, choice):  # D（合并则写到锚点）
+            # 互斥组不采信模型给的文本，一律按行号取模板原文
+            value = option_texts.get((sheet, row), option_texts.get(("", row), choice))
+            if _set_cell(ws, row, 4, value):  # D（合并则写到锚点）
                 written_choice += 1
         if remark:
             if _set_cell(ws, row, 5, remark):  # E

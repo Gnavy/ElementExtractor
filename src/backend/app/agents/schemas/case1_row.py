@@ -11,7 +11,7 @@ class Case1RowFill(BaseModel):
     row: int
     choice: Optional[str] = Field(
         default=None,
-        description="D列指标选择：yes_no 填「是」/「否」；exclusive 填选项全文或留空",
+        description="D列指标选择：yes_no 填「是」/「否」；exclusive 选中行填「选中」，其余留空（不要复述选项全文）",
     )
     remark: str = Field(
         default="",

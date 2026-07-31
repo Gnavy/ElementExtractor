@@ -22,6 +22,8 @@ _KIND_TITLES = {
     "template_check_failed": "模板核查检验未通过",
     "template_check_unparsed": "部分模板公式未参与校验",
     "period_date_from_evidence_text": "报告期取自证据说明文本",
+    "user_rules_truncated": "用户填表规则过长，尾部未进入模型提示",
+    "fact_not_grounded": "事实在源文档中找不到同行依据，已排除",
 }
 
 

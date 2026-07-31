@@ -30,6 +30,8 @@ from app.agents.schemas.case2_item import (
     Case2ItemFill,
     Case2PeriodMap,
 )
+from app.services.case2_amounts import is_repaired, parse_amount
+from app.services.case2_defaults import MAX_FILL_LOGIC_RULES_LEN
 from app.services.case2_schema_pipeline import (
     backfill_case2_schema,
     validate_case2_backfill,
@@ -775,15 +777,27 @@ def test_llm_guard_uses_fresh_handler_per_call():
     assert first is not second
 
 
-def test_llm_fallback_cap_only_when_streaming_off(monkeypatch):
-    """非流式时探测器拿不到 token 回调，必须退回硬上限，不能毫无保护。"""
+def test_llm_output_cap_applies_in_streaming_too(monkeypatch):
+    """流式也必须设输出上限——这是唯一确定性的终止条件。
+
+    2026-07-31 实测：读超时测的是字节间隔（正常响应最大间隔 0.41 秒，够不着
+    180 秒），空白探测器只数连续空白（重复非空白内容不触发），当时流式分支
+    直接返回 {}，于是证据抽取挂死 18 分钟无人叫停。
+    """
     from app.agents import llm as llm_module
 
     monkeypatch.setattr(llm_module.settings, "llm_streaming", True, raising=False)
-    assert llm_module.fallback_max_tokens(16384) == {}
+    assert llm_module.output_cap(32768) == {"max_tokens": 32768}
 
     monkeypatch.setattr(llm_module.settings, "llm_streaming", False, raising=False)
-    assert llm_module.fallback_max_tokens(16384) == {"max_tokens": 16384}
+    assert llm_module.output_cap(32768) == {"max_tokens": 32768}
+
+
+def test_case2_evidence_extraction_has_an_output_cap():
+    """证据抽取曾是唯一没有上限的调用点，回归时必须守住。"""
+    from app.agents.nodes.case2 import evidence as ev
+
+    assert ev._EVIDENCE_MAX_TOKENS >= 32768
 
 
 def test_case2_entity_ocr_typo_is_same_subject_but_group_suffix_is_not():
@@ -839,25 +853,28 @@ def test_case2_facts_survive_entity_name_ocr_typo():
 
 def test_case2_carryforward_mismatch_is_flagged_without_changing_data():
     """本期年初数与上期期末数对不上时只报复核提示。"""
-    def fact(report_date: str, period: str, subject: str, value: float) -> dict:
+    def fact(report_date: str, period: str, subject: str, value: float, src: str) -> dict:
         return {
             "statement_name": "资产负债表",
             "report_date": report_date,
             "source_period": period,
             "subject_name": subject,
             "value": value,
+            "source_ref": src,
         }
 
+    # 来源必须给全：同一份报告的年初列与期末列本就是两期，不能互比，
+    # 单份材料无法自证期末/年初是否颠倒，必须靠另一份报告交叉。
     subjects = ("货币资金", "应收账款", "资产总计", "流动资产合计")
     catalog = {
         "facts": [
-            # 2020 年末
-            *(fact("2020-12-31", "期末数", name, 100.0) for name in subjects),
-            # 2021 页的「年初数」应等于上面这组，但这里整体对不上
-            *(fact("2021-12-31", "年初数", name, 900.0) for name in subjects),
-            # 2022 页的年初数与 2021 期末数一致，不应报
-            *(fact("2021-12-31", "期末数", name, 500.0) for name in subjects),
-            *(fact("2022-12-31", "年初数", name, 500.0) for name in subjects),
+            # 2020 年报的期末数
+            *(fact("2020-12-31", "期末数", name, 100.0, "2020.md") for name in subjects),
+            # 2021 年报的「年初数」应等于上面这组，但这里整体对不上
+            *(fact("2021-12-31", "年初数", name, 900.0, "2021.md") for name in subjects),
+            # 2021 年报的期末数，与 2022 年报的年初数一致，不应报
+            *(fact("2021-12-31", "期末数", name, 500.0, "2021.md") for name in subjects),
+            *(fact("2022-12-31", "年初数", name, 500.0, "2022.md") for name in subjects),
         ]
     }
 
@@ -1170,3 +1187,683 @@ def test_case2_backfill_counts_only_nonempty_and_writes_real_types(tmp_path: Pat
         assert check["利润表"]["D5"].value is None
     finally:
         check.close()
+
+
+def test_amount_separator_repair_keeps_normal_values_untouched():
+    # 常规写法必须原样通过，重组只在常规解析失败时兜底
+    assert parse_amount("457,265,859.05") == 457265859.05
+    assert parse_amount("0.00") == 0.0
+    assert parse_amount("1.5") == 1.5
+    assert parse_amount("(1,234.56)") == -1234.56
+    assert is_repaired("457,265,859.05") is False
+
+
+def test_amount_separator_repair_recovers_ocr_confused_separators():
+    # 均取自新鸿 2023 强制整页 OCR 的真实产物
+    assert parse_amount("450,070.190.00") == 450070190.00
+    assert parse_amount("1.758,823.768.78") == 1758823768.78
+    assert parse_amount("8.785.378,359.75") == 8785378359.75
+    assert parse_amount("10.704.829,000.89") == 10704829000.89
+    assert is_repaired("1.758,823.768.78") is True
+
+
+def test_amount_repair_refuses_ambiguous_or_garbled_text():
+    # 分组不合千分位就不猜，宁可丢事实也不编数
+    assert parse_amount("1.2.3") is None
+    assert parse_amount("767、 7(Xl^00000") is None
+    assert parse_amount("abc") is None
+    assert parse_amount("") is None
+
+
+def test_normalize_value_uses_amount_repair():
+    assert _normalize_value("1.758,823.768.78", "number") == 1758823768.78
+    assert _normalize_value("1,234.50", "number") == 1234.5
+
+
+def _add_scripts_to_path() -> None:
+    import sys
+
+    scripts_dir = str((Path(__file__).resolve().parent.parent / "scripts"))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+
+
+_add_scripts_to_path()
+
+
+def test_text_layer_guard_flags_only_garbled_amount_pages():
+    from text_layer_guard import _is_wellformed
+
+    assert _is_wellformed("399,093,581.74") is True
+    assert _is_wellformed("0.00") is True
+    assert _is_wellformed("399.093、 581 74") is False
+    assert _is_wellformed("767、 7(Xl^00000") is False
+
+
+def test_text_layer_guard_recognizes_genuinely_broken_amounts():
+    """全部取自新鸿 2023 文本层的真实内容。"""
+    from text_layer_guard import _is_broken_amount
+
+    for text in (
+        "767、 7(Xl^00000",
+        "399.093、 581 74",
+        "800`955.434 17",
+        "457,265,85905",
+        "450.070 19000",
+    ):
+        assert _is_broken_amount(text) is True, text
+
+
+def test_text_layer_guard_does_not_flag_list_markers_or_dates():
+    """回归：初版判据把个人征信报告的列表序号当成畸形金额，误判整份文件。
+
+    误判方向是最坏的——会把一份准确的文本层扔掉换成 OCR 结果。
+    """
+    from text_layer_guard import _is_broken_amount
+
+    for text in (
+        "1.", "2.", "9.", "49",           # 征信报告的列表序号与条目数
+        "2023-05-01", "2023.05.01",       # 日期
+        "399,093,581.74", "-304,491,654.65", "0.00", "11,390,265,552.64",
+    ):
+        assert _is_broken_amount(text) is False, text
+
+
+def test_ocr_guards_scoped_to_case2_by_default():
+    """OCR 增强默认只对 case2 生效；case0 材料杂、误判代价高，先不启用。"""
+    from app.services.ocr_runner import ocr_guards_enabled
+
+    assert ocr_guards_enabled("case2") is True
+    assert ocr_guards_enabled("case0") is False
+    assert ocr_guards_enabled("case1") is False
+
+
+def test_user_rules_prompt_limit_matches_task_create_limit():
+    # 两处口径必须相同，否则超出部分会在进模型前被静默截掉
+    from app.services import task_create
+
+    assert task_create.MAX_FILL_LOGIC_RULES_LEN == MAX_FILL_LOGIC_RULES_LEN
+
+
+def test_map_periods_prompt_separates_negotiable_rules():
+    from app.agents.prompts.case2 import MAP_PERIODS_SYSTEM
+
+    assert "【不可协商】" in MAP_PERIODS_SYSTEM
+    assert "【默认推定】" in MAP_PERIODS_SYSTEM
+    # 主体/口径隔离与禁编造必须留在不可协商段
+    head, _, tail = MAP_PERIODS_SYSTEM.partition("【默认推定】")
+    assert "同一企业主体和同一报表口径" in head
+    assert "不得生成" in head
+    assert "最近一期报告" in tail
+
+
+_DOUBLE_COLUMN_TABLE = """## 资产负债表 2021-12-31
+
+| 资产     | 行次 |                | 年初数 负债和所有者（或股东）权益 | 行次 | 期末数        | 年初数        |
+|----------|------|----------------|--------------------------|------|---------------|---------------|
+| 流动资产：|      |                | 流动负债：                | |               |               |
+| 货币资金 | 1    | 310,893,340.43 | 134,715,961.79 短期借款   | 31   | 20,000,000.00 | 40,000,000.00 |
+| 短期投资 | 2    | 0.00           | 0.00 应付票据             | 32   | 67,113,994.45 | 0.00          |
+| 应收票据 | 3    | 699,000.00     | 3,700,000.00 应付账款     | 33   | 381,509,297.36| 1,297,816.00  |
+| 应收账款 | 4    | 311,266,236.53 | 125,100,383.26 预收账款   | 34   | 715,641,831.00| 91,232.00     |
+| 预付账款 | 5    | 20,634,073.53  | 15,217,548.83 应付职工薪酬 | 35   | 1,468,025.50  | 408,373.29    |
+"""
+
+
+def _split_rows(markdown: str) -> list[list[str]]:
+    return [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in markdown.splitlines()
+        if line.startswith("|") and set(line) - set("|- ")
+    ]
+
+
+def test_double_column_table_is_split_back_into_two_halves():
+    from table_split import split_double_column_tables
+
+    out, reports = split_double_column_tables(_DOUBLE_COLUMN_TABLE)
+    rows = _split_rows(out)
+
+    assert len(reports) == 1
+    assert reports[0]["columns_after"] == 8
+    assert reports[0]["unsplittable_cells"] == []
+    # 表头拆成「年初数」和负债侧科目列
+    assert rows[0][3] == "年初数"
+    assert rows[0][4].startswith("负债和所有者")
+    # 数据行：左半年初数与右半科目名各归各位
+    货币资金 = rows[2]
+    assert 货币资金[2] == "310,893,340.43"
+    assert 货币资金[3] == "134,715,961.79"
+    assert 货币资金[4] == "短期借款"
+    assert 货币资金[6] == "20,000,000.00"
+
+
+def test_double_column_split_handles_interleaved_header_labels():
+    # OCR 有时把两个表头格交错读成「负债和所有者 年初数 (或股东)权益」
+    from table_split import split_double_column_tables
+
+    markdown = _DOUBLE_COLUMN_TABLE.replace(
+        "年初数 负债和所有者（或股东）权益", "负债和所有者 年初数 (或股东)权益"
+    )
+    out, reports = split_double_column_tables(markdown)
+    rows = _split_rows(out)
+
+    assert len(reports) == 1
+    assert rows[0][3] == "年初数"
+    assert rows[0][4] == "负债和所有者(或股东)权益"
+
+
+def test_double_column_split_refuses_cells_it_cannot_resolve():
+    # 一格里两个金额说明还发生了跨行错位，不猜：金额侧留空并记入 failures
+    from table_split import split_double_column_tables
+
+    markdown = _DOUBLE_COLUMN_TABLE.replace(
+        "3,700,000.00 应付账款", "3,700,000.00 1,234.00 应付账款"
+    )
+    out, reports = split_double_column_tables(markdown)
+    rows = _split_rows(out)
+
+    assert reports[0]["unsplittable_cells"] == ["3,700,000.00 1,234.00 应付账款"]
+    应收票据 = rows[4]
+    assert 应收票据[3] == ""
+    assert 应收票据[4] == "3,700,000.00 1,234.00 应付账款"
+
+
+def test_double_column_split_leaves_ordinary_tables_untouched():
+    from table_split import split_double_column_tables
+
+    markdown = """| 项目     | 行次 | 本年累计金额     | 本月金额       |
+|----------|------|------------------|----------------|
+| 营业收入 | 1    | 1,114,184,729.27 | 260,731,541.20 |
+| 营业成本 | 2    | 1,094,459,146.79 | 260,128,870.11 |
+"""
+    out, reports = split_double_column_tables(markdown)
+
+    assert reports == []
+    assert out == markdown
+
+
+def test_reuse_requires_every_source_to_have_ocr_markdown(tmp_path: Path):
+    """OCR 中途失败留下的残缺产物不能被当成「已 OCR」而跳过重跑。
+
+    2026-07-31：新鸿三文件任务在第 3 份 OOM，目录里只剩 2021/2022 两份 md，
+    同材料的新任务会命中它并整个跳过 OCR，缺的 2023 再也补不上。
+    """
+    from app.services.reuse_extract import extract_has_ocr_markdown
+
+    src = tmp_path / "sources"
+    src.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (src / name).write_bytes(b"%PDF-1.4\n")
+    ocr = tmp_path / "ocr_text" / "sources"
+    ocr.mkdir(parents=True)
+
+    (ocr / "a.pdf.md").write_text("x", encoding="utf-8")
+    assert extract_has_ocr_markdown(tmp_path) is False   # 残缺
+
+    (ocr / "b.pdf.md").write_text("x", encoding="utf-8")
+    assert extract_has_ocr_markdown(tmp_path) is False   # 仍残缺
+
+    (ocr / "c.pdf.md").write_text("x", encoding="utf-8")
+    assert extract_has_ocr_markdown(tmp_path) is True    # 齐了才算数
+
+
+def test_case1_exclusive_choice_uses_template_text_not_model_output(tmp_path: Path):
+    """互斥组 D 列一律按行号取模板原文，不采信模型复述的文本。
+
+    2026-07-30 任务 19226215：「周边配套分析」选项 1 有 200+ 字带换行，
+    模型被要求复述全文，连续两轮生成到 19.8 万字符仍未闭合 JSON，任务 FAILED。
+    """
+    import json
+
+    from openpyxl import Workbook
+
+    from app.agents.nodes.case1.write_xlsx import _exclusive_option_texts, write_xlsx_node
+
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "outputs").mkdir()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["C10"] = "1. 甲选项全文"
+    ws["C11"] = "2. 乙选项全文"
+    wb.save(tmp_path / "inputs" / "collection_template.xlsx")
+    wb.close()
+
+    catalog = {
+        "sheets": [
+            {
+                "name": "Sheet1",
+                "sections": [
+                    {
+                        "indicators": [
+                            {
+                                "indicator_name": "示例组",
+                                "choice_mode": "exclusive",
+                                "rows": [
+                                    {"row": 10, "option_text": "1. 甲选项全文"},
+                                    {"row": 11, "option_text": "2. 乙选项全文"},
+                                ],
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    (tmp_path / "outputs" / "template_row_catalog.json").write_text(
+        json.dumps(catalog, ensure_ascii=False), encoding="utf-8"
+    )
+
+    assert _exclusive_option_texts(tmp_path) == {
+        ("Sheet1", 10): "1. 甲选项全文",
+        ("Sheet1", 11): "2. 乙选项全文",
+    }
+
+    # 模型只说「选中」，且故意给了个被截断的错文本，都应被模板原文覆盖
+    write_xlsx_node(
+        {
+            "extract_root": str(tmp_path),
+            "row_fills": [
+                {"sheet": "Sheet1", "row": 11, "choice": "选中", "remark": "理由"},
+            ],
+        }
+    )
+
+    check = load_workbook(tmp_path / "outputs" / "collection_filled.xlsx")
+    try:
+        assert check["Sheet1"]["D11"].value == "2. 乙选项全文"
+        assert check["Sheet1"]["D10"].value is None
+    finally:
+        check.close()
+
+
+def test_case1_fill_group_has_an_output_cap():
+    """case1 填表曾完全没有输出上限，模型失控生成会拖垮整个任务。"""
+    from app.agents.nodes.case1 import fill_group
+
+    assert fill_group._FILL_GROUP_MAX_TOKENS >= 8192
+
+
+def test_ocr_meta_fingerprint_invalidates_when_code_or_switches_change(tmp_path: Path):
+    """OCR 代码或开关变了，历史 ocr_text 不能再被复用。
+
+    复用只按材料 md5 匹配，不看产物是哪版代码跑的；改完 OCR 链路后同材料的
+    新任务会静默复用旧 markdown，日志只有一句 OCR skipped，产物上看不出来。
+    """
+    import ocr_meta
+
+    ocr_dir = tmp_path / "ocr_text"
+    switches = {"text_layer_guard": True, "table_split": True}
+
+    assert ocr_meta.meta_matches(ocr_dir, switches) is False  # 没有 meta 一律不复用
+
+    ocr_meta.write_meta(ocr_dir, switches)
+    assert ocr_meta.meta_matches(ocr_dir, switches) is True
+
+    # 开关变了就失效
+    assert ocr_meta.meta_matches(ocr_dir, {"text_layer_guard": False, "table_split": True}) is False
+
+    # 代码变了就失效（直接改存档里的指纹等价于改代码）
+    import json
+
+    meta_path = ocr_dir / ocr_meta.META_NAME
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    data["code"] = "0" * 16
+    meta_path.write_text(json.dumps(data), encoding="utf-8")
+    assert ocr_meta.meta_matches(ocr_dir, switches) is False
+
+
+def test_ocr_code_fingerprint_is_stable_and_covers_ocr_scripts():
+    import ocr_meta
+
+    assert ocr_meta.code_fingerprint() == ocr_meta.code_fingerprint()
+    assert "table_split.py" in ocr_meta._FINGERPRINT_SOURCES
+    assert "text_layer_guard.py" in ocr_meta._FINGERPRINT_SOURCES
+
+
+def test_calc_sum_partial_equals_existing_value_applies_rule_for_provenance():
+    """部分和与模型已填值相等时应用规则，只补溯源不改数。
+
+    2026-07-31 任务 90d60117：源报表没有「应付票据」这一行，模型把「应付账款」
+    的值同时填进合并行「应付票据及应付账款」，但只给应付账款带了 evidence_refs。
+    计算规则因「来源不全」跳过、不打标记，合并行于是既无证据又无计算规则标记，
+    被硬门禁「有值但没有来源证据」判定整个任务失败。
+
+    空 ≠ 缺失：那一行在源报表里本就不存在，部分和就是全和。
+    值不同时仍保留模型值（见 test_calc_sum_partial_sources_fill_empty_but_never_overwrite）。
+    """
+    calc = _calc_module()
+    data = {
+        "sheets": [
+            {
+                "sheet": "资产负债表",
+                "items": [
+                    {
+                        "item_id": "r64",
+                        "label": "应付票据及应付账款",
+                        "evidence_refs": [],
+                        "reason_one_line": "文件中未发现相关信息",
+                        "fields": {"C": {"cell": "C64", "value": 1758823768.78}},
+                    },
+                    {
+                        "item_id": "r65",
+                        "label": "其中：应付票据",
+                        "fields": {"C": {"cell": "C65", "value": None}},
+                    },
+                    {
+                        "item_id": "r66",
+                        "label": "应付账款",
+                        "evidence_refs": ["ocr_text/sources/新鸿集团审计报告2023.pdf.md"],
+                        "fields": {"C": {"cell": "C66", "value": 1758823768.78}},
+                    },
+                ],
+            }
+        ]
+    }
+    report = calc.apply_calc_rules(
+        data,
+        [
+            {
+                "op": "sum",
+                "sheet": "资产负债表",
+                "target_label": "应付票据及应付账款",
+                "source_labels": ["其中：应付票据", "应付账款"],
+            }
+        ],
+    )
+
+    target = data["sheets"][0]["items"][0]
+    assert target["fields"]["C"]["value"] == 1758823768.78        # 值不变
+    assert target["reason_one_line"].startswith("计算规则(")        # 拿到标记
+    assert target["evidence_refs"] == [                            # 继承来源证据
+        "ocr_text/sources/新鸿集团审计报告2023.pdf.md"
+    ]
+    # 值本来就相等，不算「覆盖模型值」，不该出那条复核提示
+    assert not any(
+        f["kind"] == "calc_overwrote_model_value" for f in report["review_flags"]
+    )
+
+
+def test_carryforward_check_tolerates_both_report_date_conventions():
+    """年初列的 report_date 口径不统一，两种配对都要试，否则会把正确数据判成颠倒。
+
+    2026-07-31 任务 dcb2e2bd：同一份 2023 报告里，年初列的事实一部分标成
+    「该列所属期」（2022-12-31），一部分标成「报表日」（2023-12-31）。原实现只
+    按「上年期末」比，把前者判成 8/8 全不一致，报出「期末/年初两列可能被识别颠倒」
+    ——而那批数值经逐格核对全部正确。
+    """
+    from app.agents.nodes.case2.evidence import _carryforward_review_flags
+
+    def fact(date_str, period, subject, value):
+        return {
+            "statement_name": "资产负债表",
+            "report_date": date_str,
+            "source_period": period,
+            "subject_name": subject,
+            "value": value,
+        }
+
+    subjects = {"货币资金": 800955434.17, "短期借款": 767700000.00, "应付账款": 730625997.92}
+    facts = []
+    # 口径一：年初列标成该列所属期 -> 应与「同日期末」一致
+    for name, value in subjects.items():
+        facts.append(fact("2022-12-31", "年初余额", name, value))
+        facts.append(fact("2022-12-31", "期末余额", name, value))
+    # 口径二：年初列标成报表日 -> 应与「上年期末」一致
+    for name, value in subjects.items():
+        facts.append(fact("2023-12-31", "年初余额", name, value))
+
+    assert _carryforward_review_flags({"facts": facts}) == []
+
+
+def test_carryforward_check_still_catches_a_real_swap():
+    """两种配对都对不上时仍要报警，否则这道体检就白设了。"""
+    from app.agents.nodes.case2.evidence import _carryforward_review_flags
+
+    def fact(date_str, period, subject, value, src):
+        return {
+            "statement_name": "资产负债表",
+            "report_date": date_str,
+            "source_period": period,
+            "subject_name": subject,
+            "value": value,
+            "source_ref": src,
+        }
+
+    facts = []
+    for name, opening, closing in (
+        ("货币资金", 111.0, 999.0),
+        ("短期借款", 222.0, 888.0),
+        ("应付账款", 333.0, 777.0),
+        ("存货", 444.0, 666.0),
+    ):
+        # 2022 年报的年初列（疑似与期末颠倒），拿另一份 2021 年报的期末数交叉
+        facts.append(fact("2022-12-31", "年初余额", name, opening, "2022.md"))
+        facts.append(fact("2022-12-31", "期末余额", name, closing, "2022.md"))
+        facts.append(fact("2021-12-31", "期末余额", name, closing * 2, "2021.md"))
+
+    flags = _carryforward_review_flags({"facts": facts})
+    assert [f["kind"] for f in flags] == ["carryforward_mismatch"]
+
+
+def _grounding_rows(tmp_path: Path, name: str, text: str):
+    from app.agents.nodes.case2.evidence import _source_line_index
+
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    return _source_line_index(tmp_path, name)
+
+
+def test_fact_grounding_rejects_value_borrowed_from_adjacent_row(tmp_path: Path):
+    """科目名与数值必须在源文档同一行，否则这条事实没有落地依据。
+
+    2026-07-31 任务 dcb2e2bd：主表第 145 行「递延所得税资产」三格全空，
+    第 146 行「其他非流动资产」= 18,763,198.09。模型把两行拼在一起，还编了一条
+    evidence_text «递延所得税资产 18,763,198.09»——该字符串在原文中并不存在，
+    只核对模型自报的证据拦不住，必须回源文档核。
+    """
+    from app.agents.nodes.case2.evidence import _fact_is_grounded
+
+    rows = _grounding_rows(
+        tmp_path,
+        "bs.md",
+        "## 合并资产负债表\n"
+        "| 长期待摊费用 | 872,208.71 | 868,635.47 |\n"
+        "| 递延所得税资产 |  |  |\n"
+        "| 其他非流动资产 | 18,763,198.09 | 1,440,060.92 |\n",
+    )
+
+    borrowed = {"subject_name": "递延所得税资产", "value": 18763198.09}
+    genuine = {"subject_name": "其他非流动资产", "value": 18763198.09}
+
+    assert _fact_is_grounded(borrowed, rows) is False
+    assert _fact_is_grounded(genuine, rows) is True
+
+
+def test_fact_grounding_tolerates_label_and_separator_differences(tmp_path: Path):
+    """模板标签与源文档写法不同、OCR 分隔符读错，都不能算成无据。"""
+    from app.agents.nodes.case2.evidence import _fact_is_grounded
+
+    rows = _grounding_rows(
+        tmp_path,
+        "bs.md",
+        "## 合并资产负债表\n"
+        "| 固定资产清理 |  |  | 实收资本 | 100,000,000.00 | 100,000,000.00 |\n"
+        "| 货币资金 | 399,093,581.74 | 800.955.434.17 |\n"
+        "| 其中：应付票据 | 1,234.00 |  |\n",
+    )
+
+    # 模板标签带括号后缀，源文档没有
+    assert _fact_is_grounded({"subject_name": "实收资本(或股本)", "value": 100000000.0}, rows) is True
+    # 千分位被 OCR 读成句点
+    assert _fact_is_grounded({"subject_name": "货币资金", "value": 800955434.17}, rows) is True
+    # 「其中：」前缀
+    assert _fact_is_grounded({"subject_name": "应付票据", "value": 1234.00}, rows) is True
+
+
+def test_fact_grounding_is_lenient_when_source_unavailable():
+    """取不到源文档时不做判断，不冤枉。"""
+    from app.agents.nodes.case2.evidence import _fact_is_grounded
+
+    assert _fact_is_grounded({"subject_name": "货币资金", "value": 1.0}, []) is True
+
+
+def test_facts_for_fill_excludes_ungrounded_facts():
+    from app.agents.nodes.case2.evidence import facts_for_fill
+
+    catalog = {
+        "facts": [
+            {"item_id": "资产负债表:r6", "subject_name": "货币资金", "value": 1.0},
+            {
+                "item_id": "资产负债表:r51",
+                "subject_name": "递延所得税资产",
+                "value": 2.0,
+                "grounded": False,
+            },
+        ]
+    }
+    got = facts_for_fill(
+        catalog,
+        {"资产负债表:r6", "资产负债表:r51"},
+        sheet_name="资产负债表",
+        period_mapping={},
+    )
+    assert [f["item_id"] for f in got] == ["资产负债表:r6"]
+
+
+def test_fact_grounding_rejects_notes_value_when_main_statement_lists_the_subject(tmp_path: Path):
+    """附注明细表里如实抄来的行，也不能当主表科目的依据。
+
+    2026-07-31 任务 dcb2e2bd：附注「（九）其他非流动资产」的构成里有一行
+    「递延所得税资产 | 18,763,198.09」，模型照抄给了主表科目 r51，导致
+    非流动资产合计重复计入。而主表第 145 行确实列了「递延所得税资产」，只是为空。
+    """
+    from app.agents.nodes.case2.evidence import _fact_is_grounded
+
+    rows = _grounding_rows(
+        tmp_path,
+        "bs.md",
+        "## 合并资产负债表\n"
+        "| 递延所得税资产 |  |  |\n"
+        "| 其他非流动资产 | 18,763,198.09 | 1,440,060.92 |\n"
+        "## （九）其他非流动资产\n"
+        "| 项目 | 年末余额 | 年初余额 |\n"
+        "| 递延所得税资产 | 18,763,198.09 | 1,440,060.92 |\n",
+    )
+
+    # 主表列了该科目（虽为空）→ 附注的值不得采用
+    assert _fact_is_grounded({"subject_name": "递延所得税资产", "value": 18763198.09}, rows) is False
+    # 主表自己那一行的值照常放行
+    assert _fact_is_grounded({"subject_name": "其他非流动资产", "value": 18763198.09}, rows) is True
+
+
+def test_fact_grounding_allows_notes_when_main_statement_omits_the_subject(tmp_path: Path):
+    """主表压根没有该科目时，附注可以兜底——有些科目只在附注披露，一律拒绝会误伤。"""
+    from app.agents.nodes.case2.evidence import _fact_is_grounded
+
+    rows = _grounding_rows(
+        tmp_path,
+        "bs.md",
+        "## 合并资产负债表\n"
+        "| 货币资金 | 399,093,581.74 |  |\n"
+        "## （十二）其他说明\n"
+        "| 受限资金 | 12,345.67 |  |\n",
+    )
+
+    assert _fact_is_grounded({"subject_name": "受限资金", "value": 12345.67}, rows) is True
+
+
+def test_carryforward_check_does_not_mix_sources_in_one_bucket():
+    """同一期次的年初桶会收到多份报告的事实，各报告口径不同，混在一起比谁都对不上。
+
+    2026-07-31 任务 a9bb0249：「2022-12-31 年初」桶里，货币资金来自 2023 报告
+    （该列所属期口径，实为 2022 年末），应付账款来自 2022 报告（报表日口径，
+    实为 2021 年末），8/14 对不上。按来源文档分桶后两边各自都能对上。
+    """
+    from app.agents.nodes.case2.evidence import _carryforward_review_flags
+
+    def fact(date_str, period, subject, value, src):
+        return {
+            "statement_name": "资产负债表",
+            "report_date": date_str,
+            "source_period": period,
+            "subject_name": subject,
+            "value": value,
+            "source_ref": src,
+        }
+
+    y2022 = {"货币资金": 800955434.17, "存货": 10212971620.60, "短期借款": 767700000.00}
+    y2021 = {"货币资金": 1094162068.88, "存货": 11527112451.13, "短期借款": 829800000.00}
+
+    facts = []
+    for name, value in y2022.items():
+        facts.append(fact("2022-12-31", "期末余额", name, value, "2022.md"))
+        # 2023 报告的年初列：该列所属期口径 -> 与同日期末一致
+        facts.append(fact("2022-12-31", "年初余额", name, value, "2023.md"))
+    for name, value in y2021.items():
+        facts.append(fact("2021-12-31", "期末余额", name, value, "2021.md"))
+        # 2022 报告的年初列：报表日口径 -> 与上年期末一致
+        facts.append(fact("2022-12-31", "年初余额", name, value, "2022.md"))
+
+    assert _carryforward_review_flags({"facts": facts}) == []
+
+
+def test_chunk_routing_matches_labels_with_parenthetical_suffix():
+    """模板标签带括号后缀、源文档没有时，该指标仍要被派给含它的分块。
+
+    2026-07-31 任务 a9bb0249：模板「实收资本(或股本)」归一化后是「实收资本或股本」，
+    源文档写的是「实收资本」，路由的 _label_variants 只做了「去其中/加/减前缀」、
+    没做「去括号后缀」，于是 2021 报告的主表块只分到 67 个指标（其余两份 121 个），
+    r106 不在其中，那一期整个漏抽。路由与落地校验现共用 _subject_keys。
+    """
+    from app.agents.nodes.case2.evidence import _route_evidence_chunks, _subject_keys
+
+    assert "实收资本" in _subject_keys("实收资本(或股本)")
+    assert "应付票据" in _subject_keys("其中：应付票据")
+
+    chunks = [
+        {
+            "source_ref": "ocr_text/sources/bs.md",
+            "text": "## 合并资产负债表\n| 固定资产清理 |  |  | 实收资本 | 100,000,000.00 |\n",
+        }
+    ]
+    targets = [
+        {"item_id": "资产负债表:r106", "label": "实收资本(或股本)", "sheet_name": "资产负债表"},
+        {"item_id": "资产负债表:r6", "label": "货币资金", "sheet_name": "资产负债表"},
+    ]
+    routed, _ = _route_evidence_chunks(chunks, targets)
+
+    ids = {str(t.get("item_id")) for t in (routed[0].get("targets") or [])}
+    assert "资产负债表:r106" in ids
+
+
+def test_carryforward_check_never_compares_one_report_against_itself():
+    """同一份报告的年初列与期末列本就是两期，不能互比。
+
+    2026-07-31 任务 08adc5c3：材料只有三年，2020 年报不存在，「2021-12-31 年初」
+    唯一的候选对手就是同一份 2021 报告的期末列，于是报出 26/29 不一致。
+    """
+    from app.agents.nodes.case2.evidence import _carryforward_review_flags
+
+    def fact(period, subject, value):
+        return {
+            "statement_name": "资产负债表",
+            "report_date": "2021-12-31",
+            "source_period": period,
+            "subject_name": subject,
+            "value": value,
+            "source_ref": "2021.md",
+        }
+
+    facts = []
+    for name, opening, closing in (
+        ("货币资金", 1575470029.83, 1094162068.88),
+        ("短期借款", 250000000.00, 829800000.00),
+        ("应付账款", 111.0, 222.0),
+        ("存货", 333.0, 444.0),
+    ):
+        facts.append(fact("年初余额", name, opening))
+        facts.append(fact("期末余额", name, closing))
+
+    assert _carryforward_review_flags({"facts": facts}) == []

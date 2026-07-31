@@ -131,10 +131,18 @@ def _apply_rule_to_column(
         present = [v for v in values if v is not None]
         if not present:
             return False, "no source values", None
-        # 来源不全时的部分和只能补空，不覆盖已有值
-        if len(present) < len(values) and not _is_empty(current):
-            return False, "incomplete sources, kept existing value", None
         total = sum(present, Decimal(0))
+        # 来源不全时的部分和只能补空，不覆盖已有值。
+        # 例外：部分和与已填值恰好相等时不算覆盖，照常应用规则把溯源补上——
+        # 缺的那个来源在源报表里本就没有这一行（如新鸿没有「应付票据」），
+        # 空 ≠ 缺失，此时部分和就是全和。不这么做，合并行会永远拿不到
+        # evidence_refs 与「计算规则」标记，被「有值但没有来源证据」硬门禁毙掉。
+        if (
+            len(present) < len(values)
+            and not _is_empty(current)
+            and _to_decimal(current) != total
+        ):
+            return False, "incomplete sources, kept existing value", None
 
     # Preserve int-like decimals as float/int for JSON
     if total == total.to_integral_value():

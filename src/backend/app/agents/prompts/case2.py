@@ -29,15 +29,20 @@ EXTRACT_EVIDENCE_USER = """任务 ID: {task_id}
 
 MAP_PERIODS_SYSTEM = """你是财务报表报告期映射助手。请根据全部分块汇总出的日期和列标题线索，只建立一次模板列到源报表报告期的全局映射。
 
-硬规则：
+【不可协商】以下规则任何用户填表逻辑都不得放宽：
 1. 同一 sheet 的同一模板列只能映射到一个报告期，后续所有科目必须共用。
 2. 一个 sheet 内所有列必须属于同一企业主体和同一报表口径；不得因某个科目缺失而借用其他企业、母公司或其他口径的数据。
-3. 「最近一期报告」通常对应最新报告日；「本期(年报)」对应最近完整年度；「上期」「上上期」依次向前。若材料只有年报，「最近一期」和「本期(年报)」允许同为最新年报，但必须有证据。
-4. 资产负债表是时点数；利润表和现金流量表是期间数。同一报告日下「本月金额」「本年累计金额」仍可能是不同期间口径，不得互换，也不得擅自解释成跨年。
-5. report_date 统一为 YYYY-MM-DD；证据不足则留空并将 confidence 设为 low。
-6. 不得生成 period_hints/facts 中不存在的企业、口径、年份、日期或报表名称。
-7. 必须为模板中每个列 key 输出一条映射。
-8. 输出形状必须是 {"columns": [...]}；即使只有一条也必须放在数组中。每个对象必须使用 sheet_name、field_key、column_label、entity_name、statement_scope、source_period、report_date、statement_name、confidence、evidence_text、source_ref 这些字段名，不得改成 template_column 或 evidence。
+3. 资产负债表是时点数；利润表和现金流量表是期间数。
+4. report_date 统一为 YYYY-MM-DD；证据不足则留空并将 confidence 设为 low。用户规则可以指明某列该取哪一期，但不能替代证据。
+5. 不得生成 period_hints/facts 中不存在的企业、口径、年份、日期或报表名称。
+6. 必须为模板中每个列 key 输出一条映射。
+7. 输出形状必须是 {"columns": [...]}；即使只有一条也必须放在数组中。每个对象必须使用 sheet_name、field_key、column_label、entity_name、statement_scope、source_period、report_date、statement_name、confidence、evidence_text、source_ref 这些字段名，不得改成 template_column 或 evidence。
+
+【默认推定】以下是没有用户口径时的默认解释；用户填表逻辑给出明确口径时以用户为准：
+8. 「最近一期报告」通常对应最新报告日；「本期(年报)」对应最近完整年度；「上期」「上上期」依次向前。若材料只有年报，「最近一期」和「本期(年报)」允许同为最新年报，但必须有证据。
+9. 同一报告日下「本月金额」「本年累计金额」属于不同期间口径，默认不得互换，也不得自行解释成跨年；但用户填表逻辑明确指定了某个源表列对应哪个模板列时，按用户指定执行——用户写明的对应关系不算自行解释。
+
+按用户口径而非默认推定确定的列，evidence_text 里注明依据的是哪条用户规则。
 只输出 JSON。"""
 
 MAP_PERIODS_USER = """任务 ID: {task_id}

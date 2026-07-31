@@ -54,6 +54,25 @@ class Settings(BaseSettings):
         description="强制 HuggingFace 离线（HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE）。"
         "隔离网下须开启，否则每次转换白等约 260 秒连接超时",
     )
+    ocr_text_layer_guard: bool = Field(
+        default=True,
+        description="PDF 自带文本层金额规范率过低时改用强制整页 OCR"
+        "（OCR_TEXT_LAYER_GUARD）。逐页体检约 0.25 秒/页，命中即停；"
+        "关闭则一律信任已有文本层",
+    )
+    ocr_table_split: bool = Field(
+        default=True,
+        description="把被 docling 并成一张的双栏财务报表拆回两半"
+        "（OCR_TABLE_SPLIT）。只在表头出现两个列名同格时触发，"
+        "拆不开的格留空并记入日志；关闭则保留原始表格",
+    )
+    ocr_guard_kinds: str = Field(
+        default="case2",
+        description="上面两项 OCR 增强只对哪些场景生效，逗号分隔（OCR_GUARD_KINDS）。"
+        "默认仅 case2：这两项是为财务报表设计的，case0 材料杂、文件多，"
+        "前置体检的收益未验证而误判代价高（把好文本层换成 OCR）。"
+        "留空表示所有场景都启用",
+    )
 
     llm_provider: str = Field(
         default="anthropic",

@@ -6,18 +6,20 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from app.agents.llm import fallback_max_tokens, guard_config, structured_llm
+from app.agents.llm import guard_config, output_cap, structured_llm
 from app.agents.prompts import case2 as prompts
 from app.agents.schemas.case2_item import Case2ChunkEvidence, Case2PeriodMap
 from app.agents.tools.context import write_json
+from app.services.case2_amounts import parse_amount
+from app.services.case2_defaults import MAX_FILL_LOGIC_RULES_LEN
 from app.services.case2_review import add_review_flags
 
 
 _CHUNK_CHARS = 7000
 _CHUNK_OVERLAP = 800
-# 证据抽取默认不设输出上限，由 llm.guard_config() 的退化探测兜底；
-# 仅在非流式（探测器失效）时用下面这个宽松上限保底
-_EVIDENCE_FALLBACK_MAX_TOKENS = 16384
+# 证据抽取的输出上限。实测最大的一块（121 个指标、25025 字 prompt）正常输出
+# 10080 token，这里留约 3 倍余量：正常请求碰不到，退化时能兜住。
+_EVIDENCE_MAX_TOKENS = 32768
 _PERIOD_MAP_MAX_TOKENS = 4096
 _NULL_TEXT = {"", "null", "none", "nil", "n/a", "na", "未披露", "未找到"}
 _DATE_RE = re.compile(r"(?P<year>20\d{2})[-/.年](?P<month>\d{1,2})[-/.月](?P<day>\d{1,2})日?")
@@ -376,11 +378,23 @@ def _target_items(schema: dict[str, Any]) -> list[dict[str, str]]:
     return targets
 
 
-def _label_variants(label: str) -> set[str]:
-    variants = {_normalize_text(label)}
-    stripped = _LABEL_PREFIX_RE.sub("", label).strip()
-    variants.add(_normalize_text(stripped))
-    return {value for value in variants if len(value) >= 2}
+_SUBJECT_PAREN_RE = re.compile(r"[（(][^)）]*[)）]")
+
+
+def _subject_keys(subject: Any) -> set[str]:
+    """模板标签与源文档写法常有出入：括号后缀、「其中/加/减」前缀都要能对上。
+
+    分块路由与事实落地校验都要用它，必须是同一份定义。2026-07-31 任务 a9bb0249：
+    路由侧漏了「去括号后缀」这一种，模板标签「实收资本(或股本)」对不上源文档的
+    「实收资本」，该指标没被派给含它的分块，2021 那一期整个漏抽。
+    """
+    text = str(subject or "")
+    keys = {
+        _normalize_text(text),
+        _normalize_text(_SUBJECT_PAREN_RE.sub("", text)),
+        _normalize_text(_LABEL_PREFIX_RE.sub("", text)),
+    }
+    return {key for key in keys if len(key) >= 2}
 
 
 def _statement_headings(text: str) -> set[str]:
@@ -440,7 +454,7 @@ def _route_evidence_chunks(
         }
         exact_targets: list[dict[str, str]] = []
         for target in targets:
-            if any(variant in text for variant in _label_variants(target.get("label") or "")):
+            if any(key in text for key in _subject_keys(target.get("label") or "")):
                 exact_targets.append(target)
 
         if not heading_sheets and not exact_targets:
@@ -555,9 +569,9 @@ def extract_evidence_chunk_node(state: dict[str, Any]) -> dict[str, Any]:
                 ),
             ),
         ],
-        # 输出不设上限，空转由退化探测中止；非流式时用宽松上限兜底
+        # 空转由退化探测尽早中止；上限是兜底的确定性终止条件，流式也必须设
         config=guard_config(),
-        **fallback_max_tokens(_EVIDENCE_FALLBACK_MAX_TOKENS),
+        **output_cap(_EVIDENCE_MAX_TOKENS),
     )
 
     period_defaults: dict[str, Any] = {}
@@ -661,6 +675,103 @@ def _hint_key(hint: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+_LINE_NUMBER_RE = re.compile(r"-?[\d][\d,.\s`^、]*\d|\d")
+
+
+_STATEMENT_HEAD_RE = re.compile(
+    r"^#+\s*(合并)?(资产负债表|利润表|现金流量表|所有者权益变动表)\s*$"
+)
+# 报表标题与表格之间常夹「## 2023年12月31日」「## 单位：元」这类行，不算区间结束
+_BENIGN_HEAD_RE = re.compile(r"^#+\s*(20\d{2}[年\-/].*|单位[:：].*|编制单位.*)$")
+
+
+def _source_line_index(
+    root: Path, source_ref: str
+) -> list[tuple[str, set[float], bool]]:
+    """源文档每一行 →（归一化文本, 该行所有数值, 是否属于主表区）。
+
+    主表区＝从三大报表标题起、到下一个非报表标题止。附注明细表里也会出现
+    「递延所得税资产 | 18,763,198.09」这样的行，只按「同行出现」判定会把它
+    当成主表科目的依据——2026-07-31 任务 dcb2e2bd 的 C129/D129 即由此而来。
+    """
+    path = root / str(source_ref or "").split("#")[0]
+    if not path.is_file():
+        return []
+    rows: list[tuple[str, set[float], bool]] = []
+    inside_main = False
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if _STATEMENT_HEAD_RE.match(stripped):
+            inside_main = True
+        elif stripped.startswith("#") and not _BENIGN_HEAD_RE.match(stripped):
+            inside_main = False
+        numbers: set[float] = set()
+        for match in _LINE_NUMBER_RE.finditer(line):
+            value = parse_amount(match.group(0))
+            if value is not None:
+                numbers.add(round(value, 2))
+        rows.append((_normalize_text(line), numbers, inside_main))
+    return rows
+
+
+def _fact_is_grounded(
+    fact: dict[str, Any], rows: list[tuple[str, set[float], bool]]
+) -> bool:
+    """事实要能在源文档里落地：科目名与数值同行，且该行位于主表区。
+
+    两类错误都要拦：
+    1. 编造——模型把主表某空行的科目名与相邻行的数值配在一起，再写出一条原文里
+       并不存在的 evidence_text（任务 dcb2e2bd 的「递延所得税资产 18,763,198.09」）。
+    2. 抄错地方——附注明细表里确实有「递延所得税资产 | 18,763,198.09」这一行，
+       但那是「其他非流动资产」的构成项，不是主表科目。
+
+    主表区里根本没有该科目时，允许用附注等其他位置的依据兜底：有些科目主表不列示，
+    只在附注披露，一律拒绝会误伤。
+    """
+    value = fact.get("value")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return True  # 非数值事实不在本检查范围
+    if not rows:
+        return True  # 源文档取不到就不做判断，不冤枉
+    keys = _subject_keys(fact.get("subject_name"))
+    if not keys:
+        return True
+    target = round(float(value), 2)
+
+    subject_in_main = False
+    for text, numbers, in_main in rows:
+        if not any(key in text for key in keys):
+            continue
+        if in_main:
+            subject_in_main = True
+            if target in numbers:
+                return True
+
+    if subject_in_main:
+        # 主表列示了该科目（哪怕为空），就不接受主表之外的数值
+        return False
+    # 主表没有该科目，退而接受其他位置的同行依据
+    return any(
+        target in numbers and any(key in text for key in keys)
+        for text, numbers, _ in rows
+    )
+
+
+def _mark_grounding(root: Path, facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """标注每条事实是否有源文档依据；返回无据事实清单。"""
+    index_cache: dict[str, list[tuple[str, set[float], bool]]] = {}
+    ungrounded: list[dict[str, Any]] = []
+    for fact in facts:
+        source_ref = str(fact.get("source_ref") or "")
+        if source_ref not in index_cache:
+            index_cache[source_ref] = _source_line_index(root, source_ref)
+        if _fact_is_grounded(fact, index_cache[source_ref]):
+            continue
+        fact["grounded"] = False
+        ungrounded.append(fact)
+    return ungrounded
+
+
 def merge_evidence_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     facts_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -680,13 +791,33 @@ def merge_evidence_node(state: dict[str, Any]) -> dict[str, Any]:
             facts_by_key.setdefault(_fact_key(fact), fact)
         for hint in chunk.get("period_hints") or []:
             hints_by_key.setdefault(_hint_key(hint), hint)
+    facts = list(facts_by_key.values())
+    ungrounded = _mark_grounding(root, facts)
     catalog = {
         "candidate_chunk_count": len(state.get("material_chunks") or []),
         "source_inventory": state.get("source_inventory") or [],
-        "facts": list(facts_by_key.values()),
+        "facts": facts,
         "period_hints": list(hints_by_key.values()),
     }
     write_json(root / "outputs" / "case2_evidence_catalog.json", catalog)
+    if ungrounded:
+        preview = "；".join(
+            f"{f.get('subject_name')}={f.get('value')}" for f in ungrounded[:5]
+        )
+        add_review_flags(
+            root,
+            [
+                {
+                    "kind": "fact_not_grounded",
+                    "detail": (
+                        f"{len(ungrounded)} 条事实在源文档中找不到「科目名与数值同行」的依据，"
+                        f"已排除在填报之外：{preview}"
+                        + ("…" if len(ungrounded) > 5 else "")
+                    ),
+                }
+            ],
+            stage="merge_evidence",
+        )
     return {
         "evidence_catalog": catalog,
         "log_lines": [
@@ -812,25 +943,19 @@ def _enrich_validated_column(
 
 
 def _fact_number(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value or "").replace(",", "").replace("，", "").strip()
-    if not text:
-        return None
-    negative = text.startswith("(") and text.endswith(")")
-    text = text.strip("()")
-    try:
-        number = float(text)
-    except ValueError:
-        return None
-    return -number if negative else number
+    return parse_amount(value)
 
 
 def _carryforward_review_flags(catalog: dict[str, Any]) -> list[dict[str, Any]]:
     """时点表勾稽体检：本期年初数应等于上期期末数。只提示，不改数。"""
-    buckets: dict[tuple[date, str], dict[str, float]] = {}
+    # 年初桶按「日期 + 来源文档」分，期末桶按日期汇总。
+    # 同一个日期的年初桶会同时收到多份报告的事实，而各报告的 report_date 口径不同
+    # （见下方注释），混在一起比谁都对不上一半——2026-07-31 任务 a9bb0249 即如此：
+    # 「2022-12-31 年初」桶里，货币资金来自 2023 报告（实为 2022 年末），
+    # 应付账款来自 2022 报告（实为 2021 年末）。
+    openings: dict[tuple[date, str], dict[str, float]] = {}
+    closings: dict[date, dict[str, float]] = {}
+    closing_sources: dict[date, set[str]] = {}
     for fact in catalog.get("facts") or []:
         if _normalize_statement(fact.get("statement_name")) != "资产负债表":
             continue
@@ -848,40 +973,72 @@ def _carryforward_review_flags(catalog: dict[str, Any]) -> list[dict[str, Any]]:
         subject = _normalize_text(fact.get("subject_name"))
         if number is None or not subject:
             continue
-        buckets.setdefault((report_date, kind), {}).setdefault(subject, number)
+        if kind == "opening":
+            source = str(fact.get("source_ref") or "")
+            openings.setdefault((report_date, source), {}).setdefault(subject, number)
+        else:
+            closings.setdefault(report_date, {}).setdefault(subject, number)
+            closing_sources.setdefault(report_date, set()).add(
+                str(fact.get("source_ref") or "")
+            )
 
     flags: list[dict[str, Any]] = []
-    for (report_date, kind), opening in sorted(buckets.items(), key=lambda x: str(x[0])):
-        if kind != "opening":
-            continue
+    seen_dates: set[date] = set()
+    for (report_date, source), opening in sorted(
+        openings.items(), key=lambda x: (str(x[0][0]), x[0][1])
+    ):
+        # 年初列的 report_date 口径不统一：模型有时标成「该列所属期」（应比同日期末），
+        # 有时标成「报表日」（应比上年期末）。同一份 2023 报告里两种都出现过。
+        # 因此两种配对都试，任一对得上就不报警——真正的期末/年初颠倒两边都对不上。
+        # 只按其中一种比，会把正确数据判成「两列被识别颠倒」，反过来误导人工复核。
+        candidates = [report_date]
         try:
-            previous = date(report_date.year - 1, 12, 31)
+            candidates.append(date(report_date.year - 1, 12, 31))
         except ValueError:
+            pass
+
+        best: tuple[float, list[str], list[str], date] | None = None
+        for candidate in candidates:
+            closing = closings.get(candidate)
+            if not closing:
+                continue
+            # 同一份报告的年初列与期末列本就是两期，不能互比。正确的对手报告不存在时
+            # （如材料只有三年、没有 2020 年报），宁可不比，也不要拿它凑数——
+            # 2026-07-31 任务 08adc5c3 由此报出「2021 年初 vs 2021 期末 26/29 不一致」。
+            others = closing_sources.get(candidate, set()) - {source}
+            if not others:
+                continue
+            common = sorted(set(opening) & set(closing))
+            if len(common) < 3:
+                continue
+            mismatch = [
+                subject
+                for subject in common
+                if abs(opening[subject] - closing[subject])
+                > max(1.0, abs(closing[subject]) * 0.005)
+            ]
+            score = len(mismatch) / len(common)
+            if best is None or score < best[0]:
+                best = (score, common, mismatch, candidate)
+
+        if best is None:
             continue
-        closing = buckets.get((previous, "closing"))
-        if not closing:
-            continue
-        common = sorted(set(opening) & set(closing))
-        if len(common) < 3:
-            continue
-        mismatch = [
-            subject
-            for subject in common
-            if abs(opening[subject] - closing[subject])
-            > max(1.0, abs(closing[subject]) * 0.005)
-        ]
+        _, common, mismatch, compared = best
         if len(mismatch) * 2 <= len(common):
             continue
+        if report_date in seen_dates:
+            continue  # 同一期次只提示一次，来源不同不重复刷屏
+        seen_dates.add(report_date)
         flags.append(
             {
                 "kind": "carryforward_mismatch",
                 "statement": "资产负债表",
                 "report_date": report_date.isoformat(),
-                "compared_with": previous.isoformat(),
+                "compared_with": compared.isoformat(),
                 "matched_subjects": len(common),
                 "mismatched_subjects": len(mismatch),
                 "detail": (
-                    f"{report_date.isoformat()} 的年初数与 {previous.isoformat()} 的期末数"
+                    f"{report_date.isoformat()} 的年初数与 {compared.isoformat()} 的期末数"
                     f"有 {len(mismatch)}/{len(common)} 个科目对不上，"
                     "该页期末/年初两列可能被识别颠倒，请人工复核后再采用该期数据"
                 ),
@@ -961,7 +1118,7 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
                 prompts.MAP_PERIODS_USER.format(
                     task_id=state.get("task_id") or "",
                     sheets_json=json.dumps(sheets, ensure_ascii=False, indent=2),
-                    user_rules=(state.get("user_rules") or "（无）")[:4000],
+                    user_rules=(state.get("user_rules") or "（无）")[:MAX_FILL_LOGIC_RULES_LEN],
                     period_evidence_json=json.dumps(
                         period_evidence, ensure_ascii=False
                     ),
@@ -1077,6 +1234,19 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
         )
+    rules_len = len(str(state.get("user_rules") or ""))
+    if rules_len > MAX_FILL_LOGIC_RULES_LEN:
+        review_flags.append(
+            {
+                "kind": "user_rules_truncated",
+                "detail": (
+                    f"用户填表规则共 {rules_len} 字，超出注入上限 "
+                    f"{MAX_FILL_LOGIC_RULES_LEN} 字，末尾 "
+                    f"{rules_len - MAX_FILL_LOGIC_RULES_LEN} 字未进入模型提示词；"
+                    "---CALC--- 计算规则仍由 Python 全量执行，不受影响"
+                ),
+            }
+        )
     review_flags.extend(_carryforward_review_flags(catalog))
     period_map["review_flags"] = review_flags
     add_review_flags(root, review_flags, stage="map_periods")
@@ -1110,6 +1280,11 @@ def facts_for_fill(
     period_mapping: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """按当前 sheet 的主体、口径和报告期过滤事实，避免跨材料混用。"""
+    # 无据事实（科目名与数值在源文档中不同行）不进填报上下文
+    catalog = {
+        **catalog,
+        "facts": [f for f in (catalog.get("facts") or []) if f.get("grounded") is not False],
+    }
     columns = [
         column
         for column in period_mapping.get("columns") or []

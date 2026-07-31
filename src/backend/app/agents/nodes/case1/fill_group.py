@@ -6,12 +6,17 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.agents.llm import structured_llm
+from app.agents.llm import guard_config, output_cap, structured_llm
 from app.agents.prompts import case1 as prompts
 from app.agents.schemas.case1_row import Case1GroupFill
 from app.agents.schemas.coerce import coerce_json_list
 from app.agents.tools.context import collect_ocr_snippets
 
+
+# 单个指标组的输出上限。实测最大一组正常输出约 1862 字（≈2000 token），留 4 倍余量。
+# 没有上限时模型可在 JSON 字符串里失控生成——2026-07-30 任务 19226215 的
+# 「周边配套分析」连续两轮生成到 19.8 万字符仍未闭合 JSON，整个任务因此 FAILED。
+_FILL_GROUP_MAX_TOKENS = 8192
 
 def _empty_fills(group: dict[str, Any], name: str, sheet_name: str) -> list[dict[str, Any]]:
     fills = []
@@ -35,7 +40,7 @@ def _empty_fills(group: dict[str, Any], name: str, sheet_name: str) -> list[dict
 
 def _invoke_group_fill(llm: Any, messages: list) -> Case1GroupFill:
     try:
-        return llm.invoke(messages)
+        return llm.invoke(messages, config=guard_config(), **output_cap(_FILL_GROUP_MAX_TOKENS))
     except ValidationError as exc:
         # 部分模型把 rows 整段塞成字符串；尝试从异常输入中手工解析
         for err in exc.errors():

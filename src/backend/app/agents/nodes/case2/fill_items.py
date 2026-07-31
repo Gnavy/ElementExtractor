@@ -10,11 +10,12 @@ from app.agents.nodes.case2.evidence import facts_for_fill
 from app.agents.prompts import case2 as prompts
 from app.agents.schemas.case2_item import Case2BatchFill
 from app.agents.tools.context import write_json
+from app.services.case2_amounts import parse_amount
+from app.services.case2_defaults import MAX_FILL_LOGIC_RULES_LEN
 
 
 _FILL_BATCH_MAX_TOKENS = 4096
 _NULL_TEXT = {"", "null", "none", "nil", "n/a", "na"}
-_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _DATE_RE = re.compile(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})")
 
 
@@ -103,12 +104,8 @@ def _normalize_value(value: Any, value_type: str) -> Any:
         if text.lower() in _NULL_TEXT:
             return None
         if value_type == "number":
-            negative = text.startswith("(") and text.endswith(")")
-            number = text.strip("()").replace(",", "").replace("，", "").strip()
-            if _NUMBER_RE.fullmatch(number):
-                parsed = float(number)
-                if negative:
-                    parsed = -parsed
+            parsed = parse_amount(text)
+            if parsed is not None:
                 return int(parsed) if parsed.is_integer() else parsed
         return text
     if value_type == "number" and isinstance(value, bool):
@@ -190,7 +187,7 @@ def fill_one_batch_node(state: dict[str, Any]) -> dict[str, Any]:
                     column_headers=json.dumps(
                         state.get("column_headers") or {}, ensure_ascii=False
                     ),
-                    user_rules=(state.get("user_rules") or "（无）")[:4000],
+                    user_rules=(state.get("user_rules") or "（无）")[:MAX_FILL_LOGIC_RULES_LEN],
                     items_json=json.dumps(slim, ensure_ascii=False, indent=2),
                     period_mapping_json=json.dumps(
                         [
