@@ -417,7 +417,8 @@ export function App() {
                       </span>
                     </td>
                     <td className="muted small td-time">
-                      {new Date(r.created_at).toLocaleString(undefined, {
+                      {/* 后端存的是 UTC 且不带时区后缀，补 Z 才不会被当成本地时间 */}
+                      {new Date(r.created_at + "Z").toLocaleString(undefined, {
                         month: "2-digit",
                         day: "2-digit",
                         hour: "2-digit",
