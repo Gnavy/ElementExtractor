@@ -235,8 +235,11 @@ def main() -> None:
         "warnings": warnings[:50],
     }
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps(rep, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(rep, ensure_ascii=False))
+    # default=str：日期格写入 Excel 用的是 datetime，低置信度时会进 ocr_marked
+    report.write_text(
+        json.dumps(rep, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
+    print(json.dumps(rep, ensure_ascii=False, default=str))
 
 
 if __name__ == "__main__":
