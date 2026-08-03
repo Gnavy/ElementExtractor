@@ -27,6 +27,15 @@ def _names_from_messages(messages: list) -> list[str]:
     return names
 
 
+# 这几类是内容质量问题：触发重填，但修不好也不该让整个任务失败
+_RETRY_WARNING_MARKERS = (
+    "缺少源文件名与原文引用",
+    "备注混入推演过程",
+    "结论与选择相反",
+    "未填指标选择",
+)
+
+
 def validate_case1_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     ok, log = run_tool_script(
@@ -57,7 +66,7 @@ def validate_case1_node(state: dict[str, Any]) -> dict[str, Any]:
             citation_msgs = [
                 w
                 for w in warnings
-                if "缺少源文件名与原文引用" in str(w)
+                if any(m in str(w) for m in _RETRY_WARNING_MARKERS)
             ]
             citation_retry = _names_from_messages(citation_msgs)
             msg = f"errors={len(errors)}, warnings={len(warnings)}"
