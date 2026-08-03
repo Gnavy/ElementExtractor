@@ -7,6 +7,7 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
+from app.agents.nodes.case1.index_materials import index_materials_node
 from app.agents.nodes.common.load_meta import load_meta_node
 from app.agents.nodes.general.classify import classify_node
 from app.agents.nodes.general.collection_fill import (
@@ -19,6 +20,7 @@ from app.agents.nodes.general.extract import (
     merge_extracted_node,
     prepare_fields_node,
 )
+from app.agents.nodes.general.index_extra import index_extra_materials_node
 from app.agents.nodes.general.inventory import inventory_files_node
 from app.agents.nodes.general.validate import validate_outputs_node
 from app.agents.state import GeneralState
@@ -68,6 +70,8 @@ def _route_after_mark(state: GeneralState) -> Literal["collection_fill", "valida
 def build_general_graph(checkpointer=None):
     g = StateGraph(GeneralState)
     g.add_node("load_meta", load_meta_node)
+    g.add_node("index_materials", index_materials_node)
+    g.add_node("index_extra", index_extra_materials_node)
     g.add_node("inventory", inventory_files_node)
     g.add_node("classify", classify_node)
     g.add_node("prepare_fields", prepare_fields_node)
@@ -79,7 +83,10 @@ def build_general_graph(checkpointer=None):
     g.add_node("validate", validate_outputs_node)
 
     g.add_edge(START, "load_meta")
-    g.add_edge("load_meta", "inventory")
+    # 必须排在 inventory 之前：docx/pptx 要先转成 ocr_text/*.md，inventory 只扫已存在的 md
+    g.add_edge("load_meta", "index_materials")
+    g.add_edge("index_materials", "index_extra")
+    g.add_edge("index_extra", "inventory")
 
     # inventory -> classify (or prepare_fields for extraction-only)
     g.add_conditional_edges(
