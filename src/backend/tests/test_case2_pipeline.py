@@ -1948,3 +1948,64 @@ def test_carryforward_check_never_compares_one_report_against_itself():
         facts.append(fact("期末余额", name, closing))
 
     assert _carryforward_review_flags({"facts": facts}) == []
+
+
+def test_period_columns_conflict_when_sources_differ(tmp_path=None):
+    """来源与口径都不同却指向同一报告期＝真冲突，后出现的列取消映射。
+
+    润达丰三份审计报告（2022-2024）填四期模板：E 取 2023 报告的上期金额得
+    2022-12-31，F 又取 2022 报告的本期金额也得 2022-12-31，两列抢同一批事实。
+    """
+    from app.agents.nodes.case2.evidence import _drop_duplicate_period_columns
+
+    columns = [
+        {"sheet_name": "利润表", "field_key": "C", "report_date": "2024-12-31",
+         "source_ref": "ocr_text/2024.pdf.md", "source_period": "本期金额", "confidence": "high"},
+        {"sheet_name": "利润表", "field_key": "D", "report_date": "2023-12-31",
+         "source_ref": "ocr_text/2023.pdf.md", "source_period": "本期金额", "confidence": "high"},
+        {"sheet_name": "利润表", "field_key": "E", "report_date": "2022-12-31",
+         "source_ref": "ocr_text/2023.pdf.md", "source_period": "上期金额", "confidence": "high"},
+        {"sheet_name": "利润表", "field_key": "F", "report_date": "2022-12-31",
+         "source_ref": "ocr_text/2022.pdf.md", "source_period": "本期金额", "confidence": "high"},
+    ]
+    dropped, shared = _drop_duplicate_period_columns(columns)
+
+    assert [(d[0]["field_key"], d[1]) for d in dropped] == [("F", "E")]
+    assert shared == []
+    assert [c["report_date"] for c in columns] == [
+        "2024-12-31", "2023-12-31", "2022-12-31", None,
+    ]
+
+
+def test_period_columns_may_share_one_source():
+    """同一份来源、同一口径的重复是合法的，只记复核提示不取消映射。
+
+    MAP_PERIODS_SYSTEM 规则 8：材料只有年报时，「最近一期」与「本期(年报)」
+    允许同为最新年报。按列标题语义判断会把客户模板口径写进内部代码，改看来源。
+    """
+    from app.agents.nodes.case2.evidence import _drop_duplicate_period_columns
+
+    columns = [
+        {"sheet_name": "利润表", "field_key": "C", "report_date": "2024-12-31",
+         "source_ref": "ocr_text/2024.pdf.md", "source_period": "本期金额", "confidence": "high"},
+        {"sheet_name": "利润表", "field_key": "D", "report_date": "2024-12-31",
+         "source_ref": "ocr_text/2024.pdf.md", "source_period": "本期金额", "confidence": "high"},
+    ]
+    dropped, shared = _drop_duplicate_period_columns(columns)
+
+    assert dropped == []
+    assert [(c["field_key"], owner) for c, owner in shared] == [("D", "C")]
+    assert all(c["report_date"] == "2024-12-31" for c in columns)
+
+
+def test_period_duplicate_check_is_per_sheet():
+    """不同 sheet 的同一报告期是正常的，不能误杀。"""
+    from app.agents.nodes.case2.evidence import _drop_duplicate_period_columns
+
+    columns = [
+        {"sheet_name": "利润表", "field_key": "C", "report_date": "2024-12-31"},
+        {"sheet_name": "资产负债表", "field_key": "C", "report_date": "2024-12-31"},
+    ]
+    dropped, shared = _drop_duplicate_period_columns(columns)
+    assert dropped == [] and shared == []
+    assert all(c["report_date"] == "2024-12-31" for c in columns)

@@ -1212,6 +1212,54 @@ def _validate_sheet_identity(
             raise RuntimeError(f"Case2 {sheet_name} 期次映射混入多个报表口径")
 
 
+def _column_source_key(column: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(column.get("source_ref") or ""),
+        _normalize_text(column.get("source_period")),
+    )
+
+
+def _drop_duplicate_period_columns(
+    columns: list[dict[str, Any]],
+) -> tuple[list[tuple[dict[str, Any], str]], list[tuple[dict[str, Any], str]]]:
+    """同一张表两列映射到同一报告期时，判断是合法共用还是真冲突。
+
+    返回（真冲突已取消映射的列, 合法共用的列），第二项元素是占用该报告期的列。
+
+    **同源同口径视为合法共用**：材料只有年报时，「最近一期」与「本期(年报)」
+    允许同为最新年报（MAP_PERIODS_SYSTEM 规则 8）。
+    **来源或口径不同才是冲突**：材料期数少于模板列数时，模型会把最老那列硬映射
+    成已用过的报告期——如 E 取 2023 报告的上期金额、F 取 2022 报告的本期金额，
+    两列指向同一期却各有来源，会抢同一批事实。
+
+    冲突时按 field_key 顺序（C→F 即最近→最远）保留先出现的列，数据从老的一端用尽。
+    """
+    dropped: list[tuple[dict[str, Any], str]] = []
+    shared: list[tuple[dict[str, Any], str]] = []
+    taken: dict[tuple[str, str], tuple[str, tuple[str, str]]] = {}
+    for column in sorted(columns, key=lambda c: str(c.get("field_key") or "")):
+        report_date = str(column.get("report_date") or "")
+        if not report_date:
+            continue
+        key = (str(column.get("sheet_name") or ""), report_date)
+        field_key = str(column.get("field_key") or "")
+        source = _column_source_key(column)
+        owner = taken.get(key)
+        if owner is None:
+            taken[key] = (field_key, source)
+            continue
+        if owner[1] == source:
+            shared.append((column, owner[0]))
+            continue
+        dropped.append((dict(column), owner[0]))
+        column["report_date"] = None
+        column["source_period"] = None
+        column["confidence"] = "low"
+        column["evidence_text"] = None
+        column["source_ref"] = None
+    return dropped, shared
+
+
 def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     schema = state.get("fill_schema") or {}
@@ -1315,11 +1363,40 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
 
     period_map = {"columns": list(by_key.values())}
     _validate_sheet_identity(period_map["columns"], preferred_entity=dominant_entity)
+    duplicated, shared_periods = _drop_duplicate_period_columns(period_map["columns"])
     mapped = sum(1 for column in period_map["columns"] if column.get("report_date"))
     if not mapped:
         raise RuntimeError("Case2 未能从材料证据建立任何报告期映射")
 
     review_flags: list[dict[str, Any]] = []
+    for column, taken_by in shared_periods:
+        review_flags.append(
+            {
+                "kind": "period_shared",
+                "sheet_name": column.get("sheet_name"),
+                "field_key": column.get("field_key"),
+                "detail": (
+                    f"{column.get('sheet_name')} 列 {column.get('field_key')}"
+                    f"（{column.get('column_label')}）与列 {taken_by} 同为 "
+                    f"{column.get('report_date')} 的同一份来源与口径，两列将填入相同数据，"
+                    "请确认模板是否本就如此"
+                ),
+            }
+        )
+    for column, taken_by in duplicated:
+        review_flags.append(
+            {
+                "kind": "period_duplicated",
+                "sheet_name": column.get("sheet_name"),
+                "field_key": column.get("field_key"),
+                "detail": (
+                    f"{column.get('sheet_name')} 列 {column.get('field_key')}"
+                    f"（{column.get('column_label')}）被映射到 {column.get('report_date')}，"
+                    f"但该报告期已由列 {taken_by} 占用；材料很可能不含该列所需期次，"
+                    "已取消映射并留空，请人工确认"
+                ),
+            }
+        )
     for column in period_map["columns"]:
         if column.get("report_date"):
             continue
