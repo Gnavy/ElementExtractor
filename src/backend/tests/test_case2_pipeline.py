@@ -1774,6 +1774,87 @@ def test_fact_grounding_allows_notes_when_main_statement_omits_the_subject(tmp_p
     assert _fact_is_grounded({"subject_name": "受限资金", "value": 12345.67}, rows) is True
 
 
+_SHIFTED_TABLE = (
+    # 表头被并进首个科目行（连同骑缝章号），其后每行的科目名都比数值晚一行
+    "## 利润表\n"
+    "|一、营业收入 230382||本年累计金额|本月金额|\n"
+    "| 减：营业成本 | 1 | 100.00 | 10.00 |\n"
+    "| 税金及附加 | 2 | 200.00 | 20.00 |\n"
+    "| 销售费用 | 3 | 300.00 | 30.00 |\n"
+    "| 管理费用 | 4 | 400.00 | 40.00 |\n"
+    "| 财务费用 | 6 | 500.00 | 50.00 |\n"
+    "| 研发费用 | 7 | 600.00 | 60.00 |\n"
+)
+_ALIGNED_TABLE = (
+    "## 仅限用于XX资产尽调 利润表\n"
+    "| 一、营业收入 | 1 | 11.00 | 1.00 |\n"
+    "| 减：营业成本 | 2 | 22.00 | 2.00 |\n"
+)
+_SHIFTED_FACTS = [
+    {"subject_name": "一、营业收入", "value": 100.0},
+    {"subject_name": "减：营业成本", "value": 200.0},
+    {"subject_name": "税金及附加", "value": 300.0},
+    {"subject_name": "销售费用", "value": 400.0},
+    {"subject_name": "管理费用", "value": 500.0},
+    {"subject_name": "财务费用", "value": 600.0},
+]
+
+
+def test_row_offset_detected_per_statement_not_per_file(tmp_path: Path):
+    """一份材料里错行的表和对齐的表并存时，偏移必须按单张报表统计。
+
+    东厦四个报告期各一张利润表，只有 2020 那张的表头被并进首行导致整表错行。
+    按整个文件统计会被三张对齐的表投票压过去，那张表的事实全部误杀。
+    """
+    from app.agents.nodes.case2.evidence import _detect_row_offsets, _fact_is_grounded
+
+    rows = _grounding_rows(tmp_path, "pl.md", _SHIFTED_TABLE + _ALIGNED_TABLE)
+    facts = _SHIFTED_FACTS + [{"subject_name": "一、营业收入", "value": 11.0}]
+    offsets = _detect_row_offsets(facts, rows)
+
+    assert all(_fact_is_grounded(f, rows, row_offsets=offsets) for f in _SHIFTED_FACTS)
+    # 对齐的那张表不受影响，仍按同行判定
+    assert _fact_is_grounded(facts[-1], rows, row_offsets=offsets) is True
+
+
+def test_row_offset_does_not_rescue_a_single_borrowed_value(tmp_path: Path):
+    """单条事实错配形不成整表规律，仍应判无据——否则 dcb2e2bd 的编造会被放回来。"""
+    from app.agents.nodes.case2.evidence import _detect_row_offsets, _fact_is_grounded
+
+    rows = _grounding_rows(
+        tmp_path,
+        "bs.md",
+        "## 合并资产负债表\n"
+        "| 长期待摊费用 | 872,208.71 | 868,635.47 |\n"
+        "| 递延所得税资产 |  |  |\n"
+        "| 其他非流动资产 | 18,763,198.09 | 1,440,060.92 |\n",
+    )
+    borrowed = {"subject_name": "递延所得税资产", "value": 18763198.09}
+    offsets = _detect_row_offsets([borrowed], rows)
+
+    assert _fact_is_grounded(borrowed, rows, row_offsets=offsets) is False
+
+
+def test_statement_head_survives_watermark_text(tmp_path: Path):
+    """水印、骑缝章文字被 OCR 并进标题行时，该表仍算主表区。
+
+    东厦 2021 页读成「## 仅限用于渐商资产东清(-d2o地块能资内准 利润表」，
+    按「标题等于报表名」匹配会让整张表落在主表区外，该页事实全部判无据。
+    """
+    from app.agents.nodes.case2.evidence import _source_line_index
+
+    rows = _source_line_index(*_write(tmp_path, "pl.md", _ALIGNED_TABLE))
+    assert any(row[2] for row in rows)
+    # 附注类标题仍然不算主表区
+    notes = _source_line_index(*_write(tmp_path, "n.md", "## 利润表附注明细\n| 甲 | 1.00 |\n"))
+    assert not any(row[2] for row in notes)
+
+
+def _write(tmp_path: Path, name: str, text: str):
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    return tmp_path, name
+
+
 def test_carryforward_check_does_not_mix_sources_in_one_bucket():
     """同一期次的年初桶会收到多份报告的事实，各报告口径不同，混在一起比谁都对不上。
 

@@ -678,31 +678,50 @@ def _hint_key(hint: dict[str, Any]) -> tuple[str, ...]:
 _LINE_NUMBER_RE = re.compile(r"-?[\d][\d,.\s`^、]*\d|\d")
 
 
-_STATEMENT_HEAD_RE = re.compile(
-    r"^#+\s*(合并)?(资产负债表|利润表|现金流量表|所有者权益变动表)\s*$"
-)
+_STATEMENT_NAME_RE = re.compile(r"资产负债表|利润表|现金流量表|所有者权益变动表")
+# 附注、明细、构成项的标题不算主表区——把它们认成主表，落地校验就挡不住抄错地方
+_NOTES_HEAD_RE = re.compile(r"附注|明细|构成|续表|附表")
 # 报表标题与表格之间常夹「## 2023年12月31日」「## 单位：元」这类行，不算区间结束
 _BENIGN_HEAD_RE = re.compile(r"^#+\s*(20\d{2}[年\-/].*|单位[:：].*|编制单位.*)$")
 
 
+def _is_statement_head(stripped: str) -> bool:
+    """标题行是否为三大报表的主表标题。
+
+    只要求「含报表名」而非「等于报表名」：扫描件的水印、骑缝章文字常被 OCR 并进
+    标题行（东厦 2021 页读成「## 仅限用于渐商资产东清(-d2o地块能资内准 利润表」），
+    按等值匹配会让整张表落在主表区之外，该页事实全部判成无据。
+    """
+    if not stripped.startswith("#"):
+        return False
+    if _NOTES_HEAD_RE.search(stripped):
+        return False
+    return bool(_STATEMENT_NAME_RE.search(stripped))
+
+
 def _source_line_index(
     root: Path, source_ref: str
-) -> list[tuple[str, set[float], bool]]:
-    """源文档每一行 →（归一化文本, 该行所有数值, 是否属于主表区）。
+) -> list[tuple[str, set[float], bool, int]]:
+    """源文档每一行 →（归一化文本, 该行所有数值, 是否属于主表区, 所属报表编号）。
 
     主表区＝从三大报表标题起、到下一个非报表标题止。附注明细表里也会出现
     「递延所得税资产 | 18,763,198.09」这样的行，只按「同行出现」判定会把它
     当成主表科目的依据——2026-07-31 任务 dcb2e2bd 的 C129/D129 即由此而来。
+
+    报表编号按标题逐张递增（非主表区为 -1）：一份材料常含多张同类报表（东厦四个
+    报告期各一张），错行检测必须按单张统计，否则对齐的表会把错行的表投票压过去。
     """
     path = root / str(source_ref or "").split("#")[0]
     if not path.is_file():
         return []
-    rows: list[tuple[str, set[float], bool]] = []
+    rows: list[tuple[str, set[float], bool, int]] = []
     inside_main = False
+    block_id = -1
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         stripped = line.strip()
-        if _STATEMENT_HEAD_RE.match(stripped):
+        if _is_statement_head(stripped):
             inside_main = True
+            block_id += 1
         elif stripped.startswith("#") and not _BENIGN_HEAD_RE.match(stripped):
             inside_main = False
         numbers: set[float] = set()
@@ -710,12 +729,17 @@ def _source_line_index(
             value = parse_amount(match.group(0))
             if value is not None:
                 numbers.add(round(value, 2))
-        rows.append((_normalize_text(line), numbers, inside_main))
+        rows.append(
+            (_normalize_text(line), numbers, inside_main, block_id if inside_main else -1)
+        )
     return rows
 
 
 def _fact_is_grounded(
-    fact: dict[str, Any], rows: list[tuple[str, set[float], bool]]
+    fact: dict[str, Any],
+    rows: list[tuple[str, set[float], bool, int]],
+    *,
+    row_offsets: list[int] | None = None,
 ) -> bool:
     """事实要能在源文档里落地：科目名与数值同行，且该行位于主表区。
 
@@ -727,6 +751,9 @@ def _fact_is_grounded(
 
     主表区里根本没有该科目时，允许用附注等其他位置的依据兜底：有些科目主表不列示，
     只在附注披露，一律拒绝会误伤。
+
+    ``row_offsets`` 是与 rows 等长的逐行偏移表，用于表格科目名与数值整体错行的
+    情形，由 ``_detect_row_offsets()`` 按单张报表统计定出，不由单条事实自行选择。
     """
     value = fact.get("value")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -738,13 +765,18 @@ def _fact_is_grounded(
         return True
     target = round(float(value), 2)
 
+    def _numbers_at(index: int) -> set[float]:
+        shifted = index + (row_offsets[index] if row_offsets else 0)
+        return rows[shifted][1] if 0 <= shifted < len(rows) else set()
+
     subject_in_main = False
-    for text, numbers, in_main in rows:
+    for index, row in enumerate(rows):
+        text, _numbers, in_main = row[0], row[1], row[2]
         if not any(key in text for key in keys):
             continue
         if in_main:
             subject_in_main = True
-            if target in numbers:
+            if target in _numbers_at(index):
                 return True
 
     if subject_in_main:
@@ -752,24 +784,110 @@ def _fact_is_grounded(
         return False
     # 主表没有该科目，退而接受其他位置的同行依据
     return any(
-        target in numbers and any(key in text for key in keys)
-        for text, numbers, _ in rows
+        target in _numbers_at(index) and any(key in row[0] for key in keys)
+        for index, row in enumerate(rows)
     )
 
 
-def _mark_grounding(root: Path, facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """标注每条事实是否有源文档依据；返回无据事实清单。"""
-    index_cache: dict[str, list[tuple[str, set[float], bool]]] = {}
-    ungrounded: list[dict[str, Any]] = []
+# 判定错行所需的最少命中事实数，低于此数不足以排除偶然
+_ROW_OFFSET_MIN_HITS = 5
+# 错行偏移的候选范围，只考虑表格整体下移
+_ROW_OFFSET_CANDIDATES = (1, 2)
+
+
+def _main_blocks(rows: list[tuple[str, set[float], bool, int]]) -> list[tuple[int, int]]:
+    """按报表编号切出的主表区行段，每段对应一张报表。"""
+    blocks: list[tuple[int, int]] = []
+    start: int | None = None
+    current = -1
+    for index, row in enumerate(rows):
+        block_id = row[3] if len(row) > 3 else (0 if row[2] else -1)
+        if block_id != current:
+            if start is not None:
+                blocks.append((start, index))
+            start = index if block_id >= 0 else None
+            current = block_id
+    if start is not None:
+        blocks.append((start, len(rows)))
+    return blocks
+
+
+def _block_hits(
+    facts: list[dict[str, Any]],
+    rows: list[tuple[str, set[float], bool, int]],
+    block: tuple[int, int],
+    offset: int,
+) -> int:
+    """该段内「科目名所在行 + offset 行含目标数值」的事实条数。"""
+    start, end = block
+    hits = 0
     for fact in facts:
-        source_ref = str(fact.get("source_ref") or "")
-        if source_ref not in index_cache:
-            index_cache[source_ref] = _source_line_index(root, source_ref)
-        if _fact_is_grounded(fact, index_cache[source_ref]):
+        value = fact.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        fact["grounded"] = False
-        ungrounded.append(fact)
-    return ungrounded
+        keys = _subject_keys(fact.get("subject_name"))
+        if not keys:
+            continue
+        target = round(float(value), 2)
+        for index in range(start, end):
+            if not any(key in rows[index][0] for key in keys):
+                continue
+            shifted = index + offset
+            if 0 <= shifted < len(rows) and target in rows[shifted][1]:
+                hits += 1
+                break
+    return hits
+
+
+def _detect_row_offsets(
+    facts: list[dict[str, Any]], rows: list[tuple[str, set[float], bool, int]]
+) -> list[int]:
+    """逐张报表定错行偏移，返回与 rows 等长的逐行偏移表。
+
+    扫描件的表头被并进首个科目行时，其后每一行的科目名都比数值晚一行，按「同行」
+    逐条判会把整张表的事实全部误杀。**必须按单张报表统计**：一份材料里常同时有
+    对齐的表和错行的表（东厦四个报告期各一张，只有三张错行），按整个文件统计会
+    被对齐的那张冲掉。
+
+    单条事实错配（dcb2e2bd 那种编造）形不成整张表的规律，因此要求非零偏移的命中
+    数严格多于零偏移，且达到最小条数。
+    """
+    offsets = [0] * len(rows)
+    for block in _main_blocks(rows):
+        base = _block_hits(facts, rows, block, 0)
+        best_offset, best_hits = 0, base
+        for offset in _ROW_OFFSET_CANDIDATES:
+            hits = _block_hits(facts, rows, block, offset)
+            if hits >= _ROW_OFFSET_MIN_HITS and hits > best_hits:
+                best_offset, best_hits = offset, hits
+        if best_offset:
+            for index in range(*block):
+                offsets[index] = best_offset
+    return offsets
+
+
+def _mark_grounding(
+    root: Path, facts: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], dict[str, list[int]]]:
+    """标注每条事实是否有源文档依据；返回（无据事实清单, 各源文件检出的错行偏移）。"""
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for fact in facts:
+        by_source.setdefault(str(fact.get("source_ref") or ""), []).append(fact)
+
+    ungrounded: list[dict[str, Any]] = []
+    shifted: dict[str, list[int]] = {}
+    for source_ref, source_facts in by_source.items():
+        rows = _source_line_index(root, source_ref)
+        row_offsets = _detect_row_offsets(source_facts, rows)
+        found = sorted({offset for offset in row_offsets if offset})
+        if found:
+            shifted[source_ref] = found
+        for fact in source_facts:
+            if _fact_is_grounded(fact, rows, row_offsets=row_offsets):
+                continue
+            fact["grounded"] = False
+            ungrounded.append(fact)
+    return ungrounded, shifted
 
 
 def merge_evidence_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -792,14 +910,33 @@ def merge_evidence_node(state: dict[str, Any]) -> dict[str, Any]:
         for hint in chunk.get("period_hints") or []:
             hints_by_key.setdefault(_hint_key(hint), hint)
     facts = list(facts_by_key.values())
-    ungrounded = _mark_grounding(root, facts)
+    ungrounded, row_offsets = _mark_grounding(root, facts)
     catalog = {
         "candidate_chunk_count": len(state.get("material_chunks") or []),
         "source_inventory": state.get("source_inventory") or [],
         "facts": facts,
         "period_hints": list(hints_by_key.values()),
+        "source_row_offsets": row_offsets,
     }
     write_json(root / "outputs" / "case2_evidence_catalog.json", catalog)
+    if row_offsets:
+        add_review_flags(
+            root,
+            [
+                {
+                    "kind": "source_rows_shifted",
+                    "detail": (
+                        "以下源文件存在表格科目名与数值整体错行的报表，落地校验已按检出的"
+                        "偏移核对，取数请重点抽查："
+                        + "；".join(
+                            f"{ref.rsplit('/', 1)[-1]} 偏移 {'/'.join(str(o) for o in found)} 行"
+                            for ref, found in row_offsets.items()
+                        )
+                    ),
+                }
+            ],
+            stage="merge_evidence",
+        )
     if ungrounded:
         preview = "；".join(
             f"{f.get('subject_name')}={f.get('value')}" for f in ungrounded[:5]
