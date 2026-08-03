@@ -14,6 +14,8 @@ import argparse
 import json
 from pathlib import Path
 
+from case1_quality_rules import check_exclusive_pick, check_yes_no_row
+
 
 def _norm(v) -> str:
     if v is None:
@@ -81,6 +83,13 @@ def validate(catalog_path: Path, filled_path: Path) -> dict:
                                 )
                             if d and e:
                                 stats["remarks_filled"] += 1
+                            qe, qw = check_yes_no_row(
+                                row_n, ind, d, e,
+                                r.get("option_text") or "",
+                                grp.get("indicator_explanation") or "",
+                            )
+                            errors.extend(qe)
+                            warnings.extend(qw)
 
                     elif mode == "exclusive":
                         stats["exclusive_groups"] += 1
@@ -114,6 +123,12 @@ def validate(catalog_path: Path, filled_path: Path) -> dict:
                                 )
                             if e:
                                 stats["remarks_filled"] += 1
+                            qe, qw = check_exclusive_pick(
+                                row_n, ind, d, e, rows,
+                                grp.get("indicator_explanation") or "",
+                            )
+                            errors.extend(qe)
+                            warnings.extend(qw)
     finally:
         wb.close()
 
