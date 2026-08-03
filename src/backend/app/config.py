@@ -54,6 +54,25 @@ class Settings(BaseSettings):
         description="强制 HuggingFace 离线（HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE）。"
         "隔离网下须开启，否则每次转换白等约 260 秒连接超时",
     )
+    ocr_text_layer_guard: bool = Field(
+        default=True,
+        description="PDF 自带文本层金额规范率过低时改用强制整页 OCR"
+        "（OCR_TEXT_LAYER_GUARD）。逐页体检约 0.25 秒/页，命中即停；"
+        "关闭则一律信任已有文本层",
+    )
+    ocr_table_split: bool = Field(
+        default=True,
+        description="把被 docling 并成一张的双栏财务报表拆回两半"
+        "（OCR_TABLE_SPLIT）。只在表头出现两个列名同格时触发，"
+        "拆不开的格留空并记入日志；关闭则保留原始表格",
+    )
+    ocr_guard_kinds: str = Field(
+        default="case2",
+        description="上面两项 OCR 增强只对哪些场景生效，逗号分隔（OCR_GUARD_KINDS）。"
+        "默认仅 case2：这两项是为财务报表设计的，case0 材料杂、文件多，"
+        "前置体检的收益未验证而误判代价高（把好文本层换成 OCR）。"
+        "留空表示所有场景都启用",
+    )
 
     llm_provider: str = Field(
         default="anthropic",
@@ -94,6 +113,13 @@ class Settings(BaseSettings):
         default=None,
         description="是否启用 Qwen thinking（LLM_ENABLE_THINKING）。"
         "仅用于 OpenAI/vLLM 兼容接口；留空不传参、保持模型服务默认行为",
+    )
+    llm_degeneration_whitespace_run: int = Field(
+        default=200,
+        description="退化探测：流式输出中连续空白字符超过该值即判为模型空转并中止本次调用"
+        "（LLM_DEGENERATION_WHITESPACE_RUN）。0=关闭。"
+        "某些量化模型在结构化输出下会在 JSON 冒号后无限吐空格，"
+        "此时数据仍在流动，LLM_TIMEOUT_SEC 这种读超时拦不住，只能靠内容判断",
     )
     anthropic_api_key: Optional[str] = Field(
         default=None,

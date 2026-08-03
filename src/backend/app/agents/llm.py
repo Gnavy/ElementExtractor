@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
@@ -14,6 +15,58 @@ _JSON_HINT = (
     "You must respond with valid JSON only. "
     "Output a single JSON object matching the required schema."
 )
+
+
+class LLMDegenerationError(RuntimeError):
+    """模型陷入空转（持续输出空白），已中止本次调用。"""
+
+
+class _WhitespaceRunGuard(BaseCallbackHandler):
+    """流式输出中连续空白超过阈值就中止本次调用。
+
+    须置 raise_error=True，否则 langchain 会吞掉回调中抛出的异常。
+    """
+
+    raise_error = True
+
+    def __init__(self, max_run: int) -> None:
+        self.max_run = max_run
+        self.run = 0
+        self.total = 0
+
+    def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+        for char in token or "":
+            self.total += 1
+            if char.isspace():
+                self.run += 1
+                if self.run > self.max_run:
+                    raise LLMDegenerationError(
+                        f"模型疑似空转：连续输出 {self.run} 个空白字符"
+                        f"（累计 {self.total} 字符），已中止本次调用"
+                    )
+            else:
+                self.run = 0
+
+
+def output_cap(limit: int) -> dict[str, Any]:
+    """给一次调用设输出上限。流式也要设——这是唯一确定性的终止条件。
+
+    读超时测的是相邻字节间隔，模型只要还在吐就够不着；空白探测器只数连续空白，
+    退化成重复输出非空白内容时不触发。撞上限抛错让任务快速失败，比无限挂着好。
+    """
+    return {"max_tokens": limit}
+
+
+def guard_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """给一次 invoke 挂上退化探测；每次新建 handler，避免并发共享计数。"""
+    data = dict(config or {})
+    max_run = int(settings.llm_degeneration_whitespace_run or 0)
+    if max_run <= 0:
+        return data
+    callbacks = list(data.get("callbacks") or [])
+    callbacks.append(_WhitespaceRunGuard(max_run))
+    data["callbacks"] = callbacks
+    return data
 
 
 def _provider_name() -> str:
@@ -237,8 +290,16 @@ class _BailianStructuredRunnable:
         )
 
 
-def structured_llm(schema: type, *, model: BaseChatModel | None = None):
-    """Return LLM bound to a Pydantic structured output schema."""
+def structured_llm(
+    schema: type,
+    *,
+    model: BaseChatModel | None = None,
+    method: str | None = None,
+):
+    """Return LLM bound to a Pydantic structured output schema.
+
+    ``method`` 只覆盖非百炼 provider；百炼继续优先 function calling。
+    """
     llm = model or get_chat_model()
 
     # 百炼对 json_object/json_schema 常返回空对象；function_calling 更可靠。
@@ -249,6 +310,9 @@ def structured_llm(schema: type, *, model: BaseChatModel | None = None):
         except Exception:  # noqa: BLE001
             bound = llm.with_structured_output(schema, method="json_mode")
         return _BailianStructuredRunnable(bound)
+
+    if method:
+        return llm.with_structured_output(schema, method=method)
 
     try:
         return llm.with_structured_output(schema, method="json_schema")
