@@ -11,6 +11,7 @@ from app.agents.prompts import case1 as prompts
 from app.agents.schemas.case1_row import Case1GroupFill
 from app.agents.schemas.coerce import coerce_json_list
 from app.agents.tools.context import collect_ocr_snippets
+from app.services.case1_retry_hints import previous_issues_for_group
 
 
 # 单个指标组的输出上限。实测最大一组正常输出约 1862 字（≈2000 token），留 4 倍余量。
@@ -107,6 +108,7 @@ def fill_one_group_node(state: dict[str, Any]) -> dict[str, Any]:
                 requires_tavily=bool(group.get("requires_tavily_search")),
                 tavily_hint=group.get("tavily_query_hint") or "",
                 rows_json=rows_json,
+                retry_hints=previous_issues_for_group(root, name),
                 tavily_md=tavily_md[:5000],
                 context=context,
             ),

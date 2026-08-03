@@ -46,6 +46,8 @@ tavily_query_hint: {tavily_hint}
 行目录:
 {rows_json}
 
+{retry_hints}
+
 【Tavily 检索结果】
 {tavily_md}
 
