@@ -14,6 +14,8 @@ TOOL_SCRIPTS = (
     "extract_docx_comments.py",
     "extract_docx_text.py",
     "extract_pptx_text.py",
+    "extract_excel_text.py",
+    "images_to_pdf.py",
     "fill_case1_collection.py",
     "validate_collection_filled.py",
     "tavily_search.py",
