@@ -10,6 +10,9 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
+    # Redis broker 默认 visibility_timeout 为 1 小时，超时即重投递、任务从头重跑并
+    # 覆盖已有产物；长材料任务因此永远跑不完。置为 12 小时覆盖实际最长耗时
+    broker_transport_options={"visibility_timeout": 43200},
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
