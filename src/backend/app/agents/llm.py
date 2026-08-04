@@ -298,12 +298,14 @@ def structured_llm(
     *,
     model: BaseChatModel | None = None,
     method: str | None = None,
+    scene: str | None = None,
 ):
     """Return LLM bound to a Pydantic structured output schema.
 
     ``method`` 只覆盖非百炼 provider；百炼继续优先 function calling。
+    ``scene`` 取 general / case1 / case2，按图选模型；留空用 LLM_MODEL。
     """
-    llm = model or get_chat_model()
+    llm = model or get_chat_model(model=scene_model_name(scene))
 
     # 百炼对 json_object/json_schema 常返回空对象；function_calling 更可靠。
     # 同时仍注入 json 提示，兼容部分模型回退到 json_object 的情况。
@@ -321,6 +323,22 @@ def structured_llm(
         return llm.with_structured_output(schema, method="json_schema")
     except Exception:  # noqa: BLE001
         return llm.with_structured_output(schema)
+
+
+def scene_for_task_kind(task_kind: str | None) -> str:
+    """task_kind → 场景键；general 图的三种任务共用 general
+
+    规范化与 runner._select_builder 保持一致，避免图走 A、日志记 B 的模型。
+    """
+    kind = (task_kind or "general").lower()
+    return kind if kind in ("case1", "case2") else "general"
+
+
+def scene_model_name(scene: str | None) -> str:
+    """该场景实际生效的模型名；场景没配就是 LLM_MODEL"""
+    # 场景名写错时 getattr 直接抛错，不静默退回默认模型
+    scene_model = getattr(settings, f"llm_model_{scene}") if scene else ""
+    return scene_model or settings.llm_model
 
 
 def should_skip_agent() -> bool:

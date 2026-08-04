@@ -175,7 +175,7 @@ def fill_one_batch_node(state: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    llm = structured_llm(Case2BatchFill, method="json_mode")
+    llm = structured_llm(Case2BatchFill, scene="case2", method="json_mode")
     result: Case2BatchFill = llm.invoke(
         [
             ("system", prompts.FILL_BATCH_SYSTEM),

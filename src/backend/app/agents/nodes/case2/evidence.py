@@ -553,7 +553,7 @@ def extract_evidence_chunk_node(state: dict[str, Any]) -> dict[str, Any]:
     source_location = (
         f"{source_ref}#page={chunk['page']}" if chunk.get("page") else source_ref
     )
-    llm = structured_llm(Case2ChunkEvidence, method="json_mode")
+    llm = structured_llm(Case2ChunkEvidence, scene="case2", method="json_mode")
     result: Case2ChunkEvidence = llm.invoke(
         [
             ("system", prompts.EXTRACT_EVIDENCE_SYSTEM),
@@ -1294,7 +1294,7 @@ def build_period_map_node(state: dict[str, Any]) -> dict[str, Any]:
         "period_hints": catalog.get("period_hints") or [],
         "fact_periods": list(fact_periods.values()),
     }
-    llm = structured_llm(Case2PeriodMap, method="json_mode")
+    llm = structured_llm(Case2PeriodMap, scene="case2", method="json_mode")
     result: Case2PeriodMap = llm.invoke(
         [
             ("system", prompts.MAP_PERIODS_SYSTEM),

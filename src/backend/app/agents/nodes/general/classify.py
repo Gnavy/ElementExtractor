@@ -20,7 +20,7 @@ def classify_node(state: dict[str, Any]) -> dict[str, Any]:
     file_list = "\n".join(f"- {p}" for p in files[:300]) or "（无文件）"
     context = collect_ocr_snippets(root, max_files=8, max_total_chars=12000)
 
-    llm = structured_llm(ClassificationResult)
+    llm = structured_llm(ClassificationResult, scene="general")
     result: ClassificationResult = llm.invoke(
         [
             ("system", prompts.CLASSIFY_SYSTEM),

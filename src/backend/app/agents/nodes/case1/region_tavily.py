@@ -16,7 +16,7 @@ from app.agents.tools.script_runner import run_tool_script
 def resolve_region_node(state: dict[str, Any]) -> dict[str, Any]:
     root = Path(state["extract_root"])
     context = collect_ocr_snippets(root, max_files=8, max_total_chars=10000)
-    llm = structured_llm(RegionResolve)
+    llm = structured_llm(RegionResolve, scene="case1")
     # 只返回城市/区县/依据，2048 足够
     result: RegionResolve = llm.invoke(
         [

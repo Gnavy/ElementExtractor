@@ -12,7 +12,7 @@ from app.agents.checkpoint import open_checkpointer, thread_config
 from app.agents.graphs.case1 import build_case1_graph
 from app.agents.graphs.case2 import build_case2_graph
 from app.agents.graphs.general import build_general_graph
-from app.agents.llm import should_skip_agent
+from app.agents.llm import scene_for_task_kind, scene_model_name, should_skip_agent
 from app.agents.progress import ProgressLogger
 from app.config import settings
 
@@ -50,9 +50,11 @@ def run_agent(
     logger = ProgressLogger(
         task_id=task_id, on_progress=on_progress, log_path=log_file
     )
+    # 记录本场景实际生效的模型
     logger.log(
         f"LangGraph agent start: task_kind={task_kind or 'general'} "
-        f"provider={settings.llm_provider} model={settings.llm_model}"
+        f"provider={settings.llm_provider} "
+        f"model={scene_model_name(scene_for_task_kind(task_kind))}"
     )
 
     if should_skip_agent():

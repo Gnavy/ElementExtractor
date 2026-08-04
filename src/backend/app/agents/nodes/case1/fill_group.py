@@ -89,7 +89,7 @@ def fill_one_group_node(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     rows_json = json.dumps(group.get("rows") or [], ensure_ascii=False, indent=2)
-    llm = structured_llm(Case1GroupFill)
+    llm = structured_llm(Case1GroupFill, scene="case1")
     messages = [
         ("system", prompts.FILL_GROUP_SYSTEM),
         (

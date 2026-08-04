@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.agents.graphs import build_case1_graph, build_case2_graph, build_general_graph
-from app.agents.llm import should_skip_agent
+from app.agents.llm import scene_for_task_kind, should_skip_agent, structured_llm
 from app.agents.nodes.common.load_meta import load_meta_node
 from app.agents.nodes.general.classify import parse_extract_schema
 from app.agents.nodes.general.extract import _merge_query_terms
@@ -101,3 +103,96 @@ def test_should_skip_agent_respects_env(monkeypatch):
     monkeypatch.setattr(settings, "skip_agent", False)
     monkeypatch.setattr(settings, "skip_claude", False)
     assert should_skip_agent() is False
+
+
+def _scene_models(monkeypatch, *, general="", case1="", case2=""):
+    """三个场景经 structured_llm 各自实际拿到的模型名"""
+    from app.agents import llm as llm_module
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "llm_model", "default-model")
+    monkeypatch.setattr(settings, "llm_model_general", general)
+    monkeypatch.setattr(settings, "llm_model_case1", case1)
+    monkeypatch.setattr(settings, "llm_model_case2", case2)
+
+    real_get_chat_model = llm_module.get_chat_model
+    picked: list[str] = []
+
+    def spy(**kwargs):
+        model = real_get_chat_model(**kwargs)
+        picked.append(model.model_name)
+        return model
+
+    spy.cache_clear = real_get_chat_model.cache_clear
+    monkeypatch.setattr(llm_module, "get_chat_model", spy)
+    llm_module.clear_chat_model_cache()
+    try:
+        for scene in ("general", "case1", "case2"):
+            llm_module.structured_llm(ClassificationResult, scene=scene)
+        return tuple(picked)
+    finally:
+        llm_module.clear_chat_model_cache()
+
+
+def test_scene_model_falls_back_to_default(monkeypatch):
+    # 三个场景都不配时行为与按场景配置前一致
+    assert _scene_models(monkeypatch) == ("default-model",) * 3
+
+
+def test_scene_model_overrides_default(monkeypatch):
+    assert _scene_models(monkeypatch, case1="model-a") == (
+        "default-model",
+        "model-a",
+        "default-model",
+    )
+
+
+def test_scene_models_are_independent(monkeypatch):
+    assert _scene_models(monkeypatch, case1="model-a", case2="model-b") == (
+        "default-model",
+        "model-a",
+        "model-b",
+    )
+
+
+def test_unknown_scene_fails_fast():
+    # 场景名写错时立即报错，不静默退回默认模型
+    # 用 case0 当反例：它是注释里对通用场景的口语称呼，不是有效场景键
+    with pytest.raises(AttributeError):
+        structured_llm(ClassificationResult, scene="case0")
+
+
+def test_task_kind_maps_to_scene():
+    # general 图的三种 task_kind 共用 general 一个键
+    assert scene_for_task_kind("general") == "general"
+    assert scene_for_task_kind("classification") == "general"
+    assert scene_for_task_kind("extraction") == "general"
+    assert scene_for_task_kind(None) == "general"
+    assert scene_for_task_kind("case1") == "case1"
+    assert scene_for_task_kind("case2") == "case2"
+    # 规范化方式与 runner._select_builder 一致（只 lower、不 strip）
+    assert scene_for_task_kind("CASE1") == "case1"
+
+
+def test_agent_log_records_scene_model(monkeypatch, tmp_path: Path):
+    """任务日志必须写实际生效的模型，写成 LLM_MODEL 会把排查带偏"""
+    from app.agents import runner as runner_module
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "llm_model", "default-model")
+    monkeypatch.setattr(settings, "llm_model_general", "")
+    monkeypatch.setattr(settings, "llm_model_case1", "case1-model")
+    monkeypatch.setattr(settings, "llm_model_case2", "")
+    monkeypatch.setattr(settings, "skip_agent", True)  # 只跑到日志那步就返回
+
+    def _first_line(task_kind):
+        out = tmp_path / task_kind
+        runner_module.run_agent(tmp_path, out, task_id="t1", task_kind=task_kind)
+        return (out / "agent.log").read_text(encoding="utf-8").splitlines()[0]
+
+    assert "model=case1-model" in _first_line("case1")
+    # 没单配的场景仍记录默认模型
+    assert "model=default-model" in _first_line("case2")
+    assert "model=default-model" in _first_line("extraction")

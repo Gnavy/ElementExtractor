@@ -74,7 +74,7 @@ def collection_fill_node(state: dict[str, Any]) -> dict[str, Any]:
         headers_summary = headers_path.read_text(encoding="utf-8")[:8000]
 
     context = collect_ocr_snippets(root, max_files=14, max_total_chars=22000)
-    llm = structured_llm(CollectionFillPlan)
+    llm = structured_llm(CollectionFillPlan, scene="general")
     plan: CollectionFillPlan = llm.invoke(
         [
             ("system", prompts.COLLECTION_FILL_SYSTEM),

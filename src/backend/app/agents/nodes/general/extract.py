@@ -86,7 +86,7 @@ def _attach_query_expansion(
     expanded_map: dict[str, dict[str, list[str]]] = {}
     note = "检索词扩展：规则兜底"
     try:
-        llm = structured_llm(QueryExpansionResult)
+        llm = structured_llm(QueryExpansionResult, scene="general")
         result: QueryExpansionResult = llm.invoke(
             [
                 ("system", prompts.EXPAND_QUERY_SYSTEM),
@@ -214,7 +214,7 @@ def extract_one_field_node(state: dict[str, Any]) -> dict[str, Any]:
     # 描述为空时也明确提示，避免模型只靠字段名臆测
     desc_for_prompt = desc.strip() or "（用户未填写描述；请仅依据字段名在材料中寻找，无把握则 value=null）"
 
-    llm = structured_llm(FieldExtractResult)
+    llm = structured_llm(FieldExtractResult, scene="general")
     result: FieldExtractResult = llm.invoke(
         [
             ("system", prompts.EXTRACT_FIELD_SYSTEM),
@@ -249,7 +249,7 @@ def extract_one_field_node(state: dict[str, Any]) -> dict[str, Any]:
     # Optional evidence grade + single retry（仅当有 evidence 时）
     retry_count = int(state.get("retry_count") or 0)
     if result.value not in (None, "") and result.evidence and retry_count < 1:
-        grader = structured_llm(GradeEvidence)
+        grader = structured_llm(GradeEvidence, scene="general")
         grade: GradeEvidence = grader.invoke(
             [
                 ("system", prompts.GRADE_EVIDENCE_SYSTEM),

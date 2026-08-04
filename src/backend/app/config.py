@@ -80,7 +80,20 @@ class Settings(BaseSettings):
     )
     llm_model: str = Field(
         default="claude-sonnet-4-20250514",
-        description="LLM 模型名（LLM_MODEL）",
+        description="LLM 模型名（LLM_MODEL），未按场景指定时用它",
+    )
+    llm_model_general: str = Field(
+        default="",
+        description="通用图的 LLM 模型名（LLM_MODEL_GENERAL），"
+        "覆盖 general / classification / extraction 三类任务，留空用 LLM_MODEL",
+    )
+    llm_model_case1: str = Field(
+        default="",
+        description="Case1 的 LLM 模型名（LLM_MODEL_CASE1），留空用 LLM_MODEL",
+    )
+    llm_model_case2: str = Field(
+        default="",
+        description="Case2 的 LLM 模型名（LLM_MODEL_CASE2），留空用 LLM_MODEL",
     )
     llm_timeout_sec: int = Field(
         default=3600,
