@@ -8,6 +8,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
+import json
+
+from langchain_core.callbacks import UsageMetadataCallbackHandler
+
 from app.agents.checkpoint import open_checkpointer, thread_config
 from app.agents.graphs.case1 import build_case1_graph
 from app.agents.graphs.case2 import build_case2_graph
@@ -27,6 +31,42 @@ def _select_builder(task_kind: str | None):
     if kind == "case2":
         return build_case2_graph
     return build_general_graph
+
+
+def _dump_token_usage(
+    outputs_dir: Path,
+    usage_cb: UsageMetadataCallbackHandler,
+    *,
+    task_id: str,
+    task_kind: str,
+    logger: ProgressLogger,
+) -> None:
+    """把本次任务的 token 用量写进 outputs/token_usage.json 并记一行日志"""
+    by_model = {m: dict(u) for m, u in (usage_cb.usage_metadata or {}).items()}
+    total_in = sum(u.get("input_tokens", 0) for u in by_model.values())
+    total_out = sum(u.get("output_tokens", 0) for u in by_model.values())
+    payload = {
+        "task_id": task_id,
+        "task_kind": task_kind,
+        "input_tokens": total_in,
+        "output_tokens": total_out,
+        "total_tokens": total_in + total_out,
+        "by_model": by_model,
+        "usage_available": bool(by_model),
+    }
+    try:
+        (outputs_dir / "token_usage.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.log(f"token 用量写入失败: {exc}")
+        return
+    if by_model:
+        logger.log(
+            f"token 用量: 输入 {total_in} + 输出 {total_out} = {total_in + total_out}"
+        )
+    else:
+        logger.log("token 用量: 服务端未返回 usage，统计不可用（文件中的 0 不代表实际消耗为零）")
 
 
 def run_agent(
@@ -75,12 +115,14 @@ def run_agent(
 
     err_tail = ""
     code = 1
+    usage_cb = UsageMetadataCallbackHandler()
     try:
         with open_checkpointer(extract_root) as checkpointer:
             builder = _select_builder(kind)
             graph = builder(checkpointer=checkpointer)
             config = thread_config(task_id or extract_root.name)
             config["max_concurrency"] = max(1, settings.agent_parallel_workers)
+            config["callbacks"] = [usage_cb]
             # Stream updates for progress
             for event in graph.stream(
                 initial,
@@ -112,6 +154,11 @@ def run_agent(
         if settings.agent_stream_to_console:
             sys.stderr.write(tb)
             sys.stderr.flush()
+
+    # 失败任务也要留用量，排查时能看出烧在哪
+    _dump_token_usage(
+        outputs_dir, usage_cb, task_id=task_id or "", task_kind=kind, logger=logger
+    )
 
     text = logger.tail()
     try:

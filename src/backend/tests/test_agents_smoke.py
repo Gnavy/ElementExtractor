@@ -282,6 +282,83 @@ def test_unknown_scene_fails_fast():
         structured_llm(ClassificationResult, scene="case0")
 
 
+def test_guard_config_keeps_inherited_callbacks():
+    """显式传 config 不能顶掉图上的 callbacks，否则用量统计收不到这些调用"""
+    from typing import Any
+
+    from langchain_core.callbacks import BaseCallbackHandler
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from langgraph.graph import END, START, StateGraph
+
+    from app.agents.llm import _WhitespaceRunGuard, guard_config
+
+    class Spy(BaseCallbackHandler):
+        def __init__(self) -> None:
+            self.starts = 0
+
+        def on_chat_model_start(self, *a: Any, **k: Any) -> None:
+            self.starts += 1
+
+    guard_counts: list[int] = []
+
+    def node(_state: dict[str, Any]) -> dict[str, Any]:
+        cfg = guard_config()
+        handlers = getattr(cfg.get("callbacks"), "handlers", cfg.get("callbacks")) or []
+        guard_counts.append(sum(isinstance(h, _WhitespaceRunGuard) for h in handlers))
+        FakeListChatModel(responses=["ok"]).invoke("hi", config=cfg)
+        return {"done": True}
+
+    g = StateGraph(dict)
+    g.add_node("n", node)
+    g.add_edge(START, "n")
+    g.add_edge("n", END)
+    app = g.compile()
+
+    spy = Spy()
+    app.invoke({}, config={"callbacks": [spy]})
+    assert spy.starts == 1
+
+    # 每次 invoke 只挂一个退化探测，不因继承而累积
+    app.invoke({}, config={"callbacks": [Spy()]})
+    assert set(guard_counts) == {1}
+
+
+def test_empty_token_usage_still_writes_output(tmp_path: Path):
+    """调用失败前没有 usage 时，也要留下可排查的标准产物。"""
+    from app.agents import runner as runner_module
+
+    class EmptyUsage:
+        usage_metadata = {}
+
+    class CaptureLogger:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def log(self, line: str) -> None:
+            self.lines.append(line)
+
+    logger = CaptureLogger()
+    runner_module._dump_token_usage(
+        tmp_path,
+        EmptyUsage(),
+        task_id="t1",
+        task_kind="case1",
+        logger=logger,
+    )
+
+    payload = json.loads((tmp_path / "token_usage.json").read_text(encoding="utf-8"))
+    assert payload == {
+        "task_id": "t1",
+        "task_kind": "case1",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "by_model": {},
+        "usage_available": False,
+    }
+    assert any("未返回 usage" in line for line in logger.lines)
+
+
 def test_task_kind_maps_to_scene():
     # general 图的三种 task_kind 共用 general 一个键
     assert scene_for_task_kind("general") == "general"

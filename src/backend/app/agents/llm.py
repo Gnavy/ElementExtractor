@@ -8,6 +8,7 @@ from typing import Any
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables.config import ensure_config
 
 from app.config import settings
 
@@ -61,14 +62,22 @@ def output_cap(limit: int) -> dict[str, Any]:
 
 
 def guard_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """给一次 invoke 挂上退化探测；每次新建 handler，避免并发共享计数。"""
-    data = dict(config or {})
+    """给一次 invoke 挂上退化探测；每次新建 handler，避免并发共享计数。
+
+    先继承图层传下来的 callbacks，否则显式传 config 会把它们整个顶掉，
+    挂在图上的用量统计就收不到这些调用。
+    """
+    data = dict(ensure_config(config))
     max_run = int(settings.llm_degeneration_whitespace_run or 0)
     if max_run <= 0:
         return data
-    callbacks = list(data.get("callbacks") or [])
-    callbacks.append(_WhitespaceRunGuard(max_run))
-    data["callbacks"] = callbacks
+    guard = _WhitespaceRunGuard(max_run)
+    inherited = data.get("callbacks")
+    if hasattr(inherited, "add_handler"):
+        # ensure_config 已复制该 manager，加 handler 不影响父级
+        inherited.add_handler(guard, inherit=True)
+    else:
+        data["callbacks"] = list(inherited or []) + [guard]
     return data
 
 
