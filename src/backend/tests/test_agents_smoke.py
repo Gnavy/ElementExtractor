@@ -11,11 +11,16 @@ from app.agents.graphs import build_case1_graph, build_case2_graph, build_genera
 from app.agents.llm import scene_for_task_kind, should_skip_agent, structured_llm
 from app.agents.nodes.common.load_meta import load_meta_node
 from app.agents.nodes.general.classify import parse_extract_schema
-from app.agents.nodes.general.extract import _merge_query_terms
+from app.agents.nodes.general.extract import _merge_query_terms, extract_one_field_node
 from app.agents.schemas.case1_row import Case1GroupFill, Case1RowFill
 from app.agents.schemas.classification import ClassificationResult
 from app.agents.schemas.case2_item import Case2BatchFill, Case2ItemFill
-from app.agents.schemas.extraction import FieldQueryTerms, QueryExpansionResult
+from app.agents.schemas.extraction import (
+    FieldExtractResult,
+    FieldQueryTerms,
+    GradeEvidence,
+    QueryExpansionResult,
+)
 
 
 def test_graphs_compile():
@@ -62,6 +67,119 @@ def test_merge_query_terms_keeps_description_and_llm():
     assert any("债务" in t or "债务人" in t for t in terms)
     assert "名称" not in terms  # 过宽泛词应过滤
     assert "统一社会信用代码" in terms or any("信用" in t for t in terms)
+
+
+def test_null_field_retries_with_exact_field_context(monkeypatch, tmp_path: Path):
+    """宽泛检索漏证时，只对完整字段名命中的空值补试一次。"""
+    from app.agents.nodes.general import extract as extract_module
+
+    collected_keywords: list[list[str]] = []
+    extraction_messages = []
+
+    def fake_collect(_root, *, keywords=None, **_kwargs):
+        terms = list(keywords or [])
+        collected_keywords.append(terms)
+        if terms == ["统一社会信用代码"]:
+            return "公司名称：浙江文承置业有限公司\n统一社会信用代码：91330782MADABA98X1"
+        return "债务人：浙江文承置业有限公司"
+
+    class FakeExtractLlm:
+        def invoke(self, messages):
+            extraction_messages.append(messages)
+            if len(extraction_messages) == 1:
+                return FieldExtractResult(
+                    field_name="统一社会信用代码",
+                    value=None,
+                    confidence="low",
+                )
+            return FieldExtractResult(
+                field_name="统一社会信用代码",
+                value="91330782MADABA98X1",
+                confidence="high",
+                source_files=["ocr_text/project.docx.md"],
+                evidence=[
+                    {
+                        "file": "ocr_text/project.docx.md",
+                        "quote": "统一社会信用代码：91330782MADABA98X1",
+                    }
+                ],
+            )
+
+    class FakeGradeLlm:
+        def invoke(self, _messages):
+            return GradeEvidence(grounded=False, reason="需要重新取证")
+
+    def fake_structured_llm(schema, **_kwargs):
+        return FakeExtractLlm() if schema is FieldExtractResult else FakeGradeLlm()
+
+    monkeypatch.setattr(extract_module, "collect_ocr_snippets", fake_collect)
+    monkeypatch.setattr(extract_module, "structured_llm", fake_structured_llm)
+
+    result = extract_one_field_node(
+        {
+            "extract_root": str(tmp_path),
+            "task_id": "t1",
+            "field": {
+                "name": "统一社会信用代码",
+                "description": "18 位统一社会信用代码",
+                "type": "string",
+                "query_terms": ["统一", "登记"],
+            },
+        }
+    )
+
+    item = result["extracted_fields"]["统一社会信用代码"]
+    assert item["value"] == "91330782MADABA98X1"
+    assert collected_keywords == [["统一", "登记"], ["统一社会信用代码"]]
+    assert len(extraction_messages) == 3
+    assert "91330782MADABA98X1" in extraction_messages[1][1][1]
+    assert "91330782MADABA98X1" in extraction_messages[2][1][1]
+    assert "已精确检索重试" in "\n".join(result["log_lines"])
+    assert "精确检索重试结果: 统一社会信用代码=91330782MADABA98X1" in "\n".join(
+        result["log_lines"]
+    )
+
+
+def test_null_field_skips_retry_without_exact_field_match(monkeypatch, tmp_path: Path):
+    """材料没有完整字段名时不追加模型调用。"""
+    from app.agents.nodes.general import extract as extract_module
+
+    calls = 0
+
+    def fake_collect(_root, *, keywords=None, **_kwargs):
+        return "债务人：浙江文承置业有限公司"
+
+    class FakeExtractLlm:
+        def invoke(self, _messages):
+            nonlocal calls
+            calls += 1
+            return FieldExtractResult(
+                field_name="统一社会信用代码",
+                value=None,
+                confidence="low",
+            )
+
+    monkeypatch.setattr(extract_module, "collect_ocr_snippets", fake_collect)
+    monkeypatch.setattr(
+        extract_module,
+        "structured_llm",
+        lambda _schema, **_kwargs: FakeExtractLlm(),
+    )
+
+    result = extract_one_field_node(
+        {
+            "extract_root": str(tmp_path),
+            "field": {
+                "name": "统一社会信用代码",
+                "description": "18 位统一社会信用代码",
+                "query_terms": ["统一", "登记"],
+            },
+        }
+    )
+
+    assert calls == 1
+    assert result["extracted_fields"]["统一社会信用代码"]["value"] is None
+    assert len(result["log_lines"]) == 1
 
 
 def test_query_expansion_schema():

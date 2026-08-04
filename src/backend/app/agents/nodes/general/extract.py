@@ -232,6 +232,55 @@ def extract_one_field_node(state: dict[str, Any]) -> dict[str, Any]:
         ]
     )
 
+    retry_logs: list[str] = []
+    exact_field_name = field_name.strip()
+    # 首轮上下文没有完整字段名时，短词窗口可能挤掉后部的精确证据。
+    # 仅在首轮为空且精确检索确有命中时补试一次，避免扩大所有字段的调用量。
+    if (
+        result.value in (None, "")
+        and exact_field_name
+        and exact_field_name.lower() not in context.lower()
+    ):
+        exact_context = collect_ocr_snippets(
+            root,
+            keywords=[exact_field_name],
+            max_files=8,
+            max_chars_per_file=3000,
+            max_total_chars=12000,
+        )
+        if exact_field_name.lower() in exact_context.lower():
+            context = (
+                "【精确命中材料】\n"
+                + exact_context
+                + "\n\n【首轮材料摘要】\n"
+                + context[:16000]
+            )
+            retry_logs.append(f"首轮未命中完整字段名，已精确检索重试: {field_name}")
+            result = llm.invoke(
+                [
+                    (
+                        "system",
+                        prompts.EXTRACT_FIELD_SYSTEM
+                        + "\n首轮未检索到完整字段名，以下是补充的精确命中材料。"
+                        "请重新严格取证；若材料中确实缺失仍可填 null。",
+                    ),
+                    (
+                        "human",
+                        prompts.EXTRACT_FIELD_USER.format(
+                            task_id=task_id,
+                            field_name=field_name,
+                            field_description=desc_for_prompt,
+                            field_type=ftype,
+                            classification_summary=classification_summary,
+                            context=context,
+                        ),
+                    ),
+                ]
+            )
+            retry_logs.append(
+                f"精确检索重试结果: {field_name}={_brief(result.value)}"
+            )
+
     entry = {
         "value": result.value,
         "confidence": result.confidence or "medium",
@@ -307,7 +356,7 @@ def extract_one_field_node(state: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "extracted_fields": {field_name: entry},
-        "log_lines": [
+        "log_lines": retry_logs + [
             f"已抽取字段: {field_name}={_brief(entry.get('value'))}"
         ],
         "progress": f"正在抽取字段：{field_name}",
