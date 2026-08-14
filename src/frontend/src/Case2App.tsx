@@ -193,10 +193,10 @@ export function Case2App() {
           </div>
           <nav className="app-nav">
             <a href="#/tasks" className="nav-link">
-              材料处理
+              档案分类解析
             </a>
             <a href="#/case1" className="nav-link">
-              债权管理尽调
+              评级指标核验
             </a>
             <a href="#/case2" className="nav-link is-active">
               财务模板填报

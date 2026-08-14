@@ -189,16 +189,16 @@ export function Case1App() {
           <div className="brand-block">
             <span className="brand-mark">智审</span>
             <div>
-              <span className="header-eyebrow">DUE DILIGENCE WORKSPACE</span>
-              <h1>债权管理尽调 · 指标填报</h1>
+              <span className="header-eyebrow">RATING REVIEW WORKSPACE</span>
+              <h1>评级指标核验</h1>
             </div>
           </div>
           <nav className="app-nav">
             <a href="#/tasks" className="nav-link">
-              材料处理
+              档案分类解析
             </a>
             <a href="#/case1" className="nav-link is-active">
-              债权管理尽调
+              评级指标核验
             </a>
             <a href="#/case2" className="nav-link">
               财务模板填报
@@ -304,7 +304,7 @@ export function Case1App() {
         <div className="modal-backdrop" role="presentation">
           <div className="modal-dialog modal-dialog-wide card" role="dialog" aria-modal="true"
           >
-            <div className="modal-head"><h2 className="section-title">新建债权管理尽调项目</h2>
+            <div className="modal-head"><h2 className="section-title">新建评级指标核验项目</h2>
               <button type="button" className="modal-close" disabled={busy} onClick={() => setModalOpen(false)}>×</button>
             </div>
             <form onSubmit={(e) => void onSubmit(e)} className="case1-form">

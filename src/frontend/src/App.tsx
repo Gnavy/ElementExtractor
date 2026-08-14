@@ -346,15 +346,15 @@ export function App() {
             <span className="brand-mark">智审</span>
             <div>
               <span className="header-eyebrow">INTELLIGENT REVIEW WORKSPACE</span>
-              <h1>业务审查材料处理</h1>
+              <h1>档案分类解析</h1>
             </div>
           </div>
           <nav className="app-nav">
             <a href="#/tasks" className="nav-link is-active">
-              材料处理
+              档案分类解析
             </a>
             <a href="#/case1" className="nav-link">
-              债权管理尽调
+              评级指标核验
             </a>
             <a href="#/case2" className="nav-link">
               财务模板填报
@@ -613,7 +613,7 @@ export function App() {
           >
             <div className="modal-head">
               <h2 id="modal-title" className="section-title">
-                新建材料处理项目
+                新建档案分类解析项目
               </h2>
               <button
                 type="button"
