@@ -20,7 +20,7 @@ from app.services.case1_defaults import (
 from app.services.case2_defaults import CASE2_CLASSIFICATION_BASIS, case2_extract_schema_json
 from app.services.paths import ensure_storage, task_upload_collection_storage, task_upload_zip
 from app.services.unzip_service import repair_zip_name
-from app.services.upload_zip_builder import build_zip_from_pairs
+from app.services.upload_zip_builder import build_zip_from_pairs, zip_entry
 from app.worker_tasks import process_review_task
 
 MAX_INDICATOR_JUDGMENT_RULES_LEN = 8000
@@ -103,7 +103,9 @@ def write_general_upload_zip(
     written_bytes = 0
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
-        for upload_index, (filename, data) in enumerate(uploads, start=1):
+        for upload_index, (filename, data) in enumerate(
+            sorted(uploads, key=lambda pair: Path(pair[0]).name), start=1
+        ):
             safe_name = Path(filename).name or f"材料_{upload_index}"
             if safe_name.lower().endswith(".zip"):
                 try:
@@ -135,7 +137,7 @@ def write_general_upload_zip(
                             )
                         inner_path = _safe_archive_path(raw_parts, f"文件_{upload_index}")
                         archive_name = _unique_zip_path(f"sources/{folder}/{inner_path}", used)
-                        out_zip.writestr(archive_name, content)
+                        out_zip.writestr(zip_entry(archive_name), content)
             else:
                 written_bytes += len(data)
                 if written_bytes > max_bytes:
@@ -147,7 +149,7 @@ def write_general_upload_zip(
                     f"sources/{_safe_archive_part(safe_name, f'材料_{upload_index}')}",
                     used,
                 )
-                out_zip.writestr(archive_name, data)
+                out_zip.writestr(zip_entry(archive_name), data)
 
 
 def create_general_task(

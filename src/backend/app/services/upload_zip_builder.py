@@ -2,6 +2,15 @@ import zipfile
 from pathlib import Path
 from typing import Iterable, Tuple
 
+# 固定时间戳，相同内容打出相同 MD5，历史任务的解压与 OCR 结果才能复用
+FIXED_ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+
+
+def zip_entry(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(filename=name, date_time=FIXED_ZIP_DATE_TIME)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    return info
+
 
 def build_zip_from_pairs(
     dest_zip: Path,
@@ -19,7 +28,7 @@ def build_zip_from_pairs(
     with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         if root_file is not None:
             name, data = root_file
-            zf.writestr(Path(name).name, data)
-        for name, data in extras:
+            zf.writestr(zip_entry(Path(name).name), data)
+        for name, data in sorted(extras, key=lambda pair: Path(pair[0]).name):
             safe = Path(name).name
-            zf.writestr(f"{extras_prefix}/{safe}", data)
+            zf.writestr(zip_entry(f"{extras_prefix}/{safe}"), data)
