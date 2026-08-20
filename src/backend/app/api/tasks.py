@@ -67,14 +67,28 @@ _TASK_FILE_PROCESS_DIRS = frozenset(
         "image_crops",
     }
 )
+# outputs 下属于中间产物的目录，不作为成果展示
+_TASK_OUTPUT_PROCESS_DIRS = frozenset(
+    {
+        "case2_fill_batches",
+        "__pycache__",
+        "image_pdf",
+    }
+)
 _TASK_OUTPUT_PROCESS_NAMES = frozenset(
     {
         "agent.log",
         "claude.log",
         "ocr.log",
+        "image_ocr.log",
         "langgraph_checkpoints.sqlite",
+        "docx_text_index.json",
         "docx_comments_index.json",
         "ppt_text_index.json",
+        "excel_text_index.json",
+        "ocr_all_md_index.txt",
+        "ocr_litigation_index.txt",
+        "field_query_terms.json",
         "tavily_policy_chengdu.json",
         "tavily_policy_chengdu.md",
     }
@@ -238,7 +252,7 @@ def _task_visible_files(task: Task, base: Path) -> list[dict]:
             if not target.is_file():
                 continue
             relative_parts = target.relative_to(output_root).parts
-            if "case2_fill_batches" in relative_parts or "__pycache__" in relative_parts:
+            if any(part in _TASK_OUTPUT_PROCESS_DIRS for part in relative_parts):
                 continue
             if target.name.startswith("tavily_"):
                 continue
